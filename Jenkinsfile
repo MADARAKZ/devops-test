@@ -95,11 +95,13 @@ pipeline {
       parallel {
         stage('Unit Test') {
           steps {
-            sh '''
-              set -eu
-              docker build --file "${APP_DIR}/Dockerfile" --target test \
-                -t "${IMAGE_NAME}:test-${BUILD_NUMBER}" "${APP_DIR}"
-            '''
+            retry(2) {
+              sh '''
+                set -eu
+                docker build --file "${APP_DIR}/Dockerfile" --target test \
+                  -t "${IMAGE_NAME}:test-${BUILD_NUMBER}" "${APP_DIR}"
+              '''
+            }
           }
         }
         stage('Helm Lint') {
@@ -129,15 +131,17 @@ pipeline {
     stage('Docker Build') {
       when { expression { env.SKIP_CI != 'true' } }
       steps {
-        sh '''
-          set -eu
-          docker build --file "${APP_DIR}/Dockerfile" --target runtime \
-            --label ci.build="${BUILD_NUMBER}" \
-            --label ci.commit="$(git rev-parse --short HEAD)" \
-            --label ci.target="${TARGET_ENV}" \
-            --build-arg APP_VERSION="${VERSION}" \
-            -t "${IMAGE}" "${APP_DIR}"
-        '''
+        retry(2) {
+          sh '''
+            set -eu
+            docker build --file "${APP_DIR}/Dockerfile" --target runtime \
+              --label ci.build="${BUILD_NUMBER}" \
+              --label ci.commit="$(git rev-parse --short HEAD)" \
+              --label ci.target="${TARGET_ENV}" \
+              --build-arg APP_VERSION="${VERSION}" \
+              -t "${IMAGE}" "${APP_DIR}"
+          '''
+        }
       }
     }
 
@@ -149,10 +153,12 @@ pipeline {
         }
       }
       steps {
-        sh '''
-          set -eu
-          docker push "${IMAGE}"
-        '''
+        retry(2) {
+          sh '''
+            set -eu
+            docker push "${IMAGE}"
+          '''
+        }
       }
     }
 
