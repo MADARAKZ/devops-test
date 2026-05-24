@@ -100,7 +100,7 @@ pipeline {
                   -v "$PWD/${APP_DIR}:/workspace:ro" \
                   -w /tmp/app \
                   node:20-slim \
-                  sh -c 'cp -a /workspace/. . && npm ci && npm run lint && npm test'
+                  sh -ec "cp -a /workspace/. /tmp/app/ && test -f package-lock.json && npm ci && npm run lint && npm test"
               '''
             }
           }
