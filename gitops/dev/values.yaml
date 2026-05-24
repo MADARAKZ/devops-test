@@ -29,3 +29,6 @@ resources:
 
 autoscaling:
   enabled: false
+
+service:
+  nodePort: 30080
