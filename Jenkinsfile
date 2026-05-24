@@ -96,21 +96,17 @@ pipeline {
             retry(2) {
               sh '''
                 set -eu
-                check_script=".jenkins-app-check-${BUILD_NUMBER}.sh"
-                trap 'rm -f "${check_script}"' EXIT
-                {
-                  printf '%s\n' 'set -eu'
-                  printf '%s\n' 'cp -a /repo/app/. /tmp/app/'
-                  printf '%s\n' 'test -f package-lock.json'
-                  printf '%s\n' 'npm ci'
-                  printf '%s\n' 'npm run lint'
-                  printf '%s\n' 'npm test'
-                } > "${check_script}"
-                docker run --rm \
-                  -v "$PWD:/repo:ro" \
-                  -w /tmp/app \
-                  node:20-slim \
-                  sh "/repo/${check_script}"
+                docker run --rm -i \
+                  -v "$PWD/${APP_DIR}:/src:ro" \
+                  -w /app \
+                  node:20-slim sh -s <<'EOS'
+set -eu
+cp -a /src/. /app/
+test -f package-lock.json
+npm ci
+npm run lint
+npm test
+EOS
               '''
             }
           }
