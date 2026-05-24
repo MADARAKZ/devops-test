@@ -9,7 +9,7 @@ spec:
   project: default
   source:
     repoURL: https://github.com/MADARAKZ/devops-test.git
-    targetRevision: main
+    targetRevision: gitops/prod
     path: gitops/prod
   destination:
     server: https://kubernetes.default.svc

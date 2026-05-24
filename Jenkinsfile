@@ -1,15 +1,12 @@
 pipeline {
   agent { label 'docker-agent' }
-
   parameters {
     string(name: 'REGISTRY', defaultValue: 'localhost:5000', description: 'Docker registry host:port')
     string(name: 'IMAGE_NAME', defaultValue: 'devops-demo-app', description: 'Image name')
-
     string(name: 'APP_DIR', defaultValue: 'app', description: 'Source directory mounted into the test container')
     string(name: 'DOCKERFILE', defaultValue: 'app/Dockerfile', description: 'Path to Dockerfile (relative to repo root)')
     string(name: 'DOCKER_TARGET', defaultValue: 'runtime', description: 'docker build --target')
     string(name: 'BUILD_CONTEXT_DIR', defaultValue: 'app', description: 'docker build context directory')
-
     string(name: 'TEST_IMAGE', defaultValue: 'node:20-slim', description: 'Container image used for App Lint & Test')
     text(name: 'TEST_SCRIPT', defaultValue: '''set -eu
 cp -a /src/. /app/
@@ -18,16 +15,13 @@ npm ci
 npm run lint
 npm test
 ''', description: 'Shell script run inside TEST_IMAGE. Empty = skip stage.')
-
     string(name: 'HELM_CHART', defaultValue: 'helm/devops-demo-app', description: 'Helm chart dir. Empty = skip Helm Lint.')
     string(name: 'KUSTOMIZE_OVERLAYS', defaultValue: 'dev staging prod', description: 'Space-separated overlay names. Empty = skip Kustomize Build.')
     string(name: 'GITOPS_DIR', defaultValue: 'gitops', description: 'GitOps overlays root. Empty = skip bump+push stages.')
     string(name: 'VALUES_FILE', defaultValue: 'values.yaml', description: 'File under ${GITOPS_DIR}/${OVERLAY}/ to bump')
-
     string(name: 'PROD_BRANCHES', defaultValue: 'main,master', description: 'CSV of branch names that build for prod')
     string(name: 'STAGING_BRANCH', defaultValue: 'staging', description: 'Branch that builds for staging')
     string(name: 'DEV_BRANCH', defaultValue: 'develop', description: 'Branch that builds for dev')
-
     string(name: 'GIT_USER_NAME', defaultValue: 'jenkins-ci', description: 'GitOps commit author name')
     string(name: 'GIT_USER_EMAIL', defaultValue: 'jenkins@local', description: 'GitOps commit author email')
     string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push', description: 'Jenkins credential: GitHub user + PAT')
@@ -264,13 +258,17 @@ npm test
             fi
 
             git add "${target}"
-            git commit -m "ci(${OVERLAY}): bump ${IMAGE_NAME} to ${VERSION} [skip ci]"
+            git commit -m "ci(${OVERLAY}): bump ${IMAGE_NAME} to ${VERSION}"
 
             remote_url=$(git config --get remote.origin.url)
             push_url=$(echo "$remote_url" | sed -E "s#https://#https://${GIT_USER}:${GIT_TOKEN}@#")
-            git fetch origin "${GIT_BRANCH_NAME}"
-            git rebase "origin/${GIT_BRANCH_NAME}"
-            git push "$push_url" "HEAD:${GIT_BRANCH_NAME}"
+            gitops_branch="gitops/${OVERLAY}"
+
+            if git ls-remote --exit-code --heads "$push_url" "$gitops_branch" >/dev/null 2>&1; then
+              git push --force-with-lease "$push_url" "HEAD:${gitops_branch}"
+            else
+              git push "$push_url" "HEAD:${gitops_branch}"
+            fi
           '''
         }
       }
