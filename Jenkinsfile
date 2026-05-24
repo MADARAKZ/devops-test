@@ -2,13 +2,35 @@ pipeline {
   agent { label 'docker-agent' }
 
   parameters {
-    string(name: 'REGISTRY',     defaultValue: 'localhost:5000',           description: 'Docker registry host:port')
-    string(name: 'IMAGE_NAME',   defaultValue: 'devops-demo-app',          description: 'Image name (without registry)')
-    string(name: 'CHART_PATH',   defaultValue: 'helm/devops-demo-app',     description: 'Helm chart directory')
-    string(name: 'GITOPS_DIR',   defaultValue: 'gitops',                   description: 'Root of GitOps overlays')
-    string(name: 'GIT_USER_NAME',  defaultValue: 'jenkins-ci',             description: 'Author name for GitOps commits')
-    string(name: 'GIT_USER_EMAIL', defaultValue: 'jenkins@local',          description: 'Author email for GitOps commits')
-    string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push',        description: 'Jenkins credential ID with GitHub username + PAT')
+    string(name: 'REGISTRY', defaultValue: 'localhost:5000', description: 'Docker registry host:port')
+    string(name: 'IMAGE_NAME', defaultValue: 'devops-demo-app', description: 'Image name')
+
+    string(name: 'APP_DIR', defaultValue: 'app', description: 'Source directory mounted into the test container')
+    string(name: 'DOCKERFILE', defaultValue: 'app/Dockerfile', description: 'Path to Dockerfile (relative to repo root)')
+    string(name: 'DOCKER_TARGET', defaultValue: 'runtime', description: 'docker build --target')
+    string(name: 'DOCKER_CONTEXT', defaultValue: 'app', description: 'docker build context directory')
+
+    string(name: 'TEST_IMAGE', defaultValue: 'node:20-slim', description: 'Container image used for App Lint & Test')
+    text(name: 'TEST_SCRIPT', defaultValue: '''set -eu
+cp -a /src/. /app/
+test -f package-lock.json
+npm ci
+npm run lint
+npm test
+''', description: 'Shell script run inside TEST_IMAGE. Empty = skip stage.')
+
+    string(name: 'HELM_CHART', defaultValue: 'helm/devops-demo-app', description: 'Helm chart dir. Empty = skip Helm Lint.')
+    string(name: 'KUSTOMIZE_OVERLAYS', defaultValue: 'dev staging prod', description: 'Space-separated overlay names. Empty = skip Kustomize Build.')
+    string(name: 'GITOPS_DIR', defaultValue: 'gitops', description: 'GitOps overlays root. Empty = skip bump+push stages.')
+    string(name: 'VALUES_FILE', defaultValue: 'values.yaml', description: 'File under ${GITOPS_DIR}/${OVERLAY}/ to bump')
+
+    string(name: 'PROD_BRANCHES', defaultValue: 'main,master', description: 'CSV of branch names that build for prod')
+    string(name: 'STAGING_BRANCH', defaultValue: 'staging', description: 'Branch that builds for staging')
+    string(name: 'DEV_BRANCH', defaultValue: 'develop', description: 'Branch that builds for dev')
+
+    string(name: 'GIT_USER_NAME', defaultValue: 'jenkins-ci', description: 'GitOps commit author name')
+    string(name: 'GIT_USER_EMAIL', defaultValue: 'jenkins@local', description: 'GitOps commit author email')
+    string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push', description: 'Jenkins credential: GitHub user + PAT')
   }
 
   options {
@@ -19,65 +41,68 @@ pipeline {
   }
 
   environment {
-    APP_DIR     = 'app'
-    REGISTRY    = "${params.REGISTRY}"
-    IMAGE_NAME  = "${params.IMAGE_NAME}"
-    CHART_PATH  = "${params.CHART_PATH}"
-    GITOPS_DIR  = "${params.GITOPS_DIR}"
+    REGISTRY = "${params.REGISTRY}"
+    IMAGE_NAME = "${params.IMAGE_NAME}"
+    APP_DIR = "${params.APP_DIR}"
+    DOCKERFILE = "${params.DOCKERFILE}"
+    DOCKER_TARGET = "${params.DOCKER_TARGET}"
+    DOCKER_CONTEXT = "${params.DOCKER_CONTEXT}"
+    TEST_IMAGE = "${params.TEST_IMAGE}"
+    HELM_CHART = "${params.HELM_CHART}"
+    KUSTOMIZE_OVERLAYS = "${params.KUSTOMIZE_OVERLAYS}"
+    GITOPS_DIR = "${params.GITOPS_DIR}"
+    VALUES_FILE = "${params.VALUES_FILE}"
+    SKIP = 'false'
   }
 
   stages {
-
     stage('Checkout & Resolve Strategy') {
       steps {
         checkout scm
         script {
-          def shortSha   = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          def commitMsg  = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
-          def branch     = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
-          def tag        = env.TAG_NAME
-          def skipCi     = commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')
+          def shortSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          def commitMsg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
+          def branch = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+          def tag = env.TAG_NAME
+          def skipCi = commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')
 
           if (skipCi) {
+            env.SKIP = 'true'
             currentBuild.result = 'NOT_BUILT'
             currentBuild.description = 'skipped [skip ci]'
             echo 'Commit is marked [skip ci] — skipping CI stages.'
             return
           }
 
+          def prodBranches = params.PROD_BRANCHES.split(',').collect { it.trim() }.findAll { it }
+
           def cfg
           if (tag) {
-            cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod', version: tag]
-          } else if (branch == 'main' || branch == 'master') {
-            cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod',
-                   version: "prod-${env.BUILD_NUMBER}-${shortSha}"]
-          } else if (branch == 'staging') {
-            cfg = [target:'staging', push:true, bump:true, approval:false, overlay:'staging',
-                   version: "rc-${env.BUILD_NUMBER}-${shortSha}"]
-          } else if (branch == 'develop') {
-            cfg = [target:'dev', push:true, bump:true, approval:false, overlay:'dev',
-                   version: "dev-${env.BUILD_NUMBER}-${shortSha}"]
+            cfg = [target: 'prod', push: true, bump: true, approval: true, overlay: 'prod', version: tag]
+          } else if (prodBranches.contains(branch)) {
+            cfg = [target: 'prod', push: true, bump: true, approval: true, overlay: 'prod', version: "prod-${env.BUILD_NUMBER}-${shortSha}"]
+          } else if (branch == params.STAGING_BRANCH) {
+            cfg = [target: 'staging', push: true, bump: true, approval: false, overlay: 'staging', version: "rc-${env.BUILD_NUMBER}-${shortSha}"]
+          } else if (branch == params.DEV_BRANCH) {
+            cfg = [target: 'dev', push: true, bump: true, approval: false, overlay: 'dev', version: "dev-${env.BUILD_NUMBER}-${shortSha}"]
           } else if (branch.startsWith('release/')) {
             def rc = branch.replaceFirst('release/', '').replaceAll('[^A-Za-z0-9._-]', '-')
-            cfg = [target:'release', push:true, bump:false, approval:false, overlay:null,
-                   version: "rc-${rc}-${shortSha}"]
+            cfg = [target: 'release', push: true, bump: false, approval: false, overlay: null, version: "rc-${rc}-${shortSha}"]
           } else if (branch.startsWith('hotfix/')) {
             def hf = branch.replaceFirst('hotfix/', '').replaceAll('[^A-Za-z0-9._-]', '-')
-            cfg = [target:'hotfix', push:true, bump:false, approval:false, overlay:null,
-                   version: "hotfix-${hf}-${shortSha}"]
+            cfg = [target: 'hotfix', push: true, bump: false, approval: false, overlay: null, version: "hotfix-${hf}-${shortSha}"]
           } else {
-            cfg = [target:'feature', push:false, bump:false, approval:false, overlay:null,
-                   version: "feat-${env.BUILD_NUMBER}-${shortSha}"]
+            cfg = [target: 'feature', push: false, bump: false, approval: false, overlay: null, version: "feat-${env.BUILD_NUMBER}-${shortSha}"]
           }
 
-          env.TARGET_ENV       = cfg.target
-          env.DO_PUSH          = cfg.push.toString()
-          env.DO_BUMP          = cfg.bump.toString()
+          env.TARGET_ENV = cfg.target
+          env.DO_PUSH = cfg.push.toString()
+          env.DO_BUMP = cfg.bump.toString()
           env.REQUIRE_APPROVAL = cfg.approval.toString()
-          env.OVERLAY          = cfg.overlay ?: ''
-          env.VERSION          = cfg.version
-          env.IMAGE            = "${env.REGISTRY}/${env.IMAGE_NAME}:${cfg.version}"
-          env.GIT_BRANCH_NAME  = branch
+          env.OVERLAY = cfg.overlay ?: ''
+          env.VERSION = cfg.version
+          env.IMAGE = "${env.REGISTRY}/${env.IMAGE_NAME}:${cfg.version}"
+          env.GIT_BRANCH_NAME = branch
 
           echo "--- Strategy ---"
           echo "Branch=${branch}  Tag=${tag ?: '-'}  Target=${cfg.target}  Overlay=${cfg.overlay ?: '-'}"
@@ -89,37 +114,48 @@ pipeline {
     }
 
     stage('Test') {
-      when { expression { currentBuild.result != 'NOT_BUILT' } }
+      when { expression { env.SKIP != 'true' } }
       parallel {
         stage('App Lint & Test') {
+          when { expression { params.TEST_SCRIPT?.trim() } }
           steps {
             retry(2) {
-              sh '''
-                set -eu
-                docker run --rm \
-                  -v "$PWD/${APP_DIR}:/workspace:ro" \
-                  -w /tmp/app \
-                  node:20-slim \
-                  sh -ec "cp -a /workspace/. /tmp/app/ && test -f package-lock.json && npm ci && npm run lint && npm test"
-              '''
+              script {
+                writeFile file: '.ci-test.sh', text: params.TEST_SCRIPT
+                sh '''
+                  set -eu
+                  docker run --rm \
+                    -v "$PWD/${APP_DIR}:/src:ro" \
+                    -v "$PWD/.ci-test.sh:/test.sh:ro" \
+                    -w /app \
+                    "${TEST_IMAGE}" sh /test.sh
+                '''
+              }
             }
           }
         }
         stage('Helm Lint') {
+          when { expression { env.HELM_CHART?.trim() } }
           steps {
             sh '''
               set -eu
-              helm lint "${CHART_PATH}"
-              helm template lint-check "${CHART_PATH}" > /dev/null
+              helm lint "${HELM_CHART}"
+              helm template lint-check "${HELM_CHART}" > /dev/null
             '''
           }
         }
         stage('Kustomize Build') {
+          when {
+            allOf {
+              expression { env.KUSTOMIZE_OVERLAYS?.trim() }
+              expression { env.GITOPS_DIR?.trim() }
+            }
+          }
           steps {
             sh '''
               set -eu
               kubectl version --client=true >/dev/null
-              for overlay in dev staging prod; do
+              for overlay in ${KUSTOMIZE_OVERLAYS}; do
                 echo "--- Rendering ${GITOPS_DIR}/${overlay} ---"
                 kubectl kustomize --enable-helm "${GITOPS_DIR}/${overlay}" > /dev/null
               done
@@ -130,17 +166,17 @@ pipeline {
     }
 
     stage('Docker Build') {
-      when { expression { currentBuild.result != 'NOT_BUILT' } }
+      when { expression { env.SKIP != 'true' } }
       steps {
         retry(2) {
           sh '''
             set -eu
-            docker build --file "${APP_DIR}/Dockerfile" --target runtime \
+            docker build --file "${DOCKERFILE}" --target "${DOCKER_TARGET}" \
               --label ci.build="${BUILD_NUMBER}" \
               --label ci.commit="$(git rev-parse --short HEAD)" \
               --label ci.target="${TARGET_ENV}" \
               --build-arg APP_VERSION="${VERSION}" \
-              -t "${IMAGE}" "${APP_DIR}"
+              -t "${IMAGE}" "${DOCKER_CONTEXT}"
           '''
         }
       }
@@ -149,16 +185,13 @@ pipeline {
     stage('Image Push') {
       when {
         allOf {
-          expression { currentBuild.result != 'NOT_BUILT' }
+          expression { env.SKIP != 'true' }
           expression { env.DO_PUSH == 'true' }
         }
       }
       steps {
         retry(2) {
-          sh '''
-            set -eu
-            docker push "${IMAGE}"
-          '''
+          sh 'docker push "${IMAGE}"'
         }
       }
     }
@@ -166,9 +199,9 @@ pipeline {
     stage('Production Approval') {
       when {
         allOf {
+          expression { env.SKIP != 'true' }
           expression { env.DO_BUMP == 'true' }
           expression { env.REQUIRE_APPROVAL == 'true' }
-          expression { currentBuild.result != 'NOT_BUILT' }
         }
       }
       steps {
@@ -179,13 +212,14 @@ pipeline {
     stage('Bump GitOps Image Tag') {
       when {
         allOf {
-          expression { currentBuild.result != 'NOT_BUILT' }
+          expression { env.SKIP != 'true' }
           expression { env.DO_BUMP == 'true' }
+          expression { env.GITOPS_DIR?.trim() }
         }
       }
       steps {
         script {
-          def valuesFile = "${env.GITOPS_DIR}/${env.OVERLAY}/values.yaml"
+          def valuesFile = "${env.GITOPS_DIR}/${env.OVERLAY}/${env.VALUES_FILE}"
           sh """
             set -eu
             test -f "${valuesFile}"
@@ -194,7 +228,7 @@ pipeline {
               BEGIN { in_image=0 }
               /^image:/ { in_image=1; print; next }
               in_image && /^  repository:/ { print "  repository: " repo; next }
-              in_image && /^  tag:/         { print "  tag: " tag; next }
+              in_image && /^  tag:/ { print "  tag: " tag; next }
               in_image && /^[^ ]/ { in_image=0 }
               { print }
             ' "${valuesFile}" > "\$tmp"
@@ -209,8 +243,9 @@ pipeline {
     stage('Commit & Push GitOps') {
       when {
         allOf {
-          expression { currentBuild.result != 'NOT_BUILT' }
+          expression { env.SKIP != 'true' }
           expression { env.DO_BUMP == 'true' }
+          expression { env.GITOPS_DIR?.trim() }
         }
       }
       steps {
@@ -219,15 +254,16 @@ pipeline {
                                           passwordVariable: 'GIT_TOKEN')]) {
           sh '''
             set -eu
-            git config user.name  "${GIT_USER_NAME}"
+            git config user.name "${GIT_USER_NAME}"
             git config user.email "${GIT_USER_EMAIL}"
 
-            if git diff --quiet -- "${GITOPS_DIR}/${OVERLAY}/values.yaml"; then
-              echo "No change in ${GITOPS_DIR}/${OVERLAY}/values.yaml — nothing to commit."
+            target="${GITOPS_DIR}/${OVERLAY}/${VALUES_FILE}"
+            if git diff --quiet -- "${target}"; then
+              echo "No change in ${target} — nothing to commit."
               exit 0
             fi
 
-            git add "${GITOPS_DIR}/${OVERLAY}/values.yaml"
+            git add "${target}"
             git commit -m "ci(${OVERLAY}): bump ${IMAGE_NAME} to ${VERSION} [skip ci]"
 
             remote_url=$(git config --get remote.origin.url)
