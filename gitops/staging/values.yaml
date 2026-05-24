@@ -1,6 +1,6 @@
 image:
   repository: localhost:5000/devops-demo-app
-  tag: staging-bootstrap
+  tag: rc-19-fcdd62c
   pullPolicy: IfNotPresent
 
 replicaCount: 2
@@ -33,3 +33,6 @@ autoscaling:
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
+
+service:
+  nodePort: 30081
