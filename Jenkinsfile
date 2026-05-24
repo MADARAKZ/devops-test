@@ -37,17 +37,16 @@ pipeline {
           def commitMsg  = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
           def branch     = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
           def tag        = env.TAG_NAME
+          def skipCi     = commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')
 
-          if (commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')) {
-            env.SKIP_CI = 'true'
+          def cfg
+          if (skipCi) {
             currentBuild.result = 'NOT_BUILT'
             currentBuild.description = 'skipped [skip ci]'
             echo 'Commit is marked [skip ci] — skipping CI stages.'
-            return
-          }
-
-          def cfg
-          if (tag) {
+            cfg = [target:'skip', push:false, bump:false, approval:false, overlay:null,
+                   version: "skip-${env.BUILD_NUMBER}-${shortSha}"]
+          } else if (tag) {
             cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod', version: tag]
           } else if (branch == 'main' || branch == 'master') {
             cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod',
@@ -72,6 +71,7 @@ pipeline {
           }
 
           env.TARGET_ENV       = cfg.target
+          env.SKIP_CI          = skipCi.toString()
           env.DO_PUSH          = cfg.push.toString()
           env.DO_BUMP          = cfg.bump.toString()
           env.REQUIRE_APPROVAL = cfg.approval.toString()
