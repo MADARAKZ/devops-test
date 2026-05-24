@@ -27,6 +27,7 @@ awk '
 ' key="${KEY_PATH}" "${CASC_TEMPLATE}" > "${CASC_OUTPUT}"
 
 printf '%s\n' "$(cat "${KEY_PATH}.pub")" > ".local/agent_pubkey.env"
+printf "JENKINS_AGENT_SSH_PUBKEY='%s'\n" "$(cat "${KEY_PATH}.pub")" > ".env"
 echo "Rendered ${CASC_OUTPUT}"
 
 export JENKINS_AGENT_SSH_PUBKEY
@@ -39,7 +40,7 @@ if docker compose version >/dev/null 2>&1; then
   docker compose rm -sf jenkins-agent jenkins-controller >/dev/null 2>&1 || true
   docker compose up -d --build
 else
-  docker-compose rm -sf jenkins-agent jenkins-controller >/dev/null 2>&1 || true
+  docker-compose rm -sf jenkins-agent jenkins-controller demo-app >/dev/null 2>&1 || true
   docker-compose up -d --build
 fi
 

@@ -1,30 +1,98 @@
+def sanitizeBranchName(String branch) {
+  return (branch ?: 'detached')
+    .replaceFirst(/^refs\/heads\//, '')
+    .replaceAll(/[^A-Za-z0-9._-]+/, '-')
+    .replaceAll(/^-+|-+$/, '')
+}
+
+def isProdBranch(String branch) {
+  return branch in ['main', 'master']
+}
+
+def resolveStrategy(String branch, String tag, String buildNumber, String shortSha) {
+  if (tag?.trim()) {
+    return [
+      targetEnv: 'prod',
+      overlay: 'prod',
+      imageTag: tag,
+      pushImage: true,
+      updateGitOps: true,
+      requiresApproval: true,
+      gitopsBranch: 'main'
+    ]
+  }
+
+  if (isProdBranch(branch)) {
+    return [
+      targetEnv: 'prod',
+      overlay: 'prod',
+      imageTag: "prod-${buildNumber}-${shortSha}",
+      pushImage: true,
+      updateGitOps: true,
+      requiresApproval: true,
+      gitopsBranch: branch
+    ]
+  }
+
+  if (branch in ['develop', 'dev']) {
+    return [
+      targetEnv: 'dev',
+      overlay: 'dev',
+      imageTag: "dev-${buildNumber}-${shortSha}",
+      pushImage: true,
+      updateGitOps: true,
+      requiresApproval: false,
+      gitopsBranch: branch
+    ]
+  }
+
+  if (branch == 'staging' || branch?.startsWith('release/')) {
+    return [
+      targetEnv: 'staging',
+      overlay: 'staging',
+      imageTag: "rc-${buildNumber}-${shortSha}",
+      pushImage: true,
+      updateGitOps: true,
+      requiresApproval: false,
+      gitopsBranch: branch
+    ]
+  }
+
+  if (branch?.startsWith('hotfix/')) {
+    def hotfixName = sanitizeBranchName(branch.replaceFirst(/^hotfix\//, ''))
+    return [
+      targetEnv: 'prod',
+      overlay: 'prod',
+      imageTag: "hotfix-${hotfixName}-${buildNumber}-${shortSha}",
+      pushImage: true,
+      updateGitOps: true,
+      requiresApproval: true,
+      gitopsBranch: branch
+    ]
+  }
+
+  return [
+    targetEnv: 'feature',
+    overlay: '',
+    imageTag: "feat-${buildNumber}-${shortSha}",
+    pushImage: false,
+    updateGitOps: false,
+    requiresApproval: false,
+    gitopsBranch: branch
+  ]
+}
+
 pipeline {
   agent { label 'docker-agent' }
+
   parameters {
     string(name: 'REGISTRY', defaultValue: 'localhost:5000', description: 'Docker registry host:port')
-    string(name: 'IMAGE_NAME', defaultValue: 'devops-demo-app', description: 'Image name')
-    string(name: 'APP_DIR', defaultValue: 'app', description: 'Source directory mounted into the test container')
-    string(name: 'DOCKERFILE', defaultValue: 'app/Dockerfile', description: 'Path to Dockerfile (relative to repo root)')
-    string(name: 'DOCKER_TARGET', defaultValue: 'runtime', description: 'docker build --target')
-    string(name: 'BUILD_CONTEXT_DIR', defaultValue: 'app', description: 'docker build context directory')
-    string(name: 'TEST_IMAGE', defaultValue: 'node:20-slim', description: 'Container image used for App Lint & Test')
-    text(name: 'TEST_SCRIPT', defaultValue: '''set -eu
-cp -a /src/. /app/
-test -f package-lock.json
-npm ci
-npm run lint
-npm test
-''', description: 'Shell script run inside TEST_IMAGE. Empty = skip stage.')
-    string(name: 'HELM_CHART', defaultValue: 'helm/devops-demo-app', description: 'Helm chart dir. Empty = skip Helm Lint.')
-    string(name: 'KUSTOMIZE_OVERLAYS', defaultValue: 'dev staging prod', description: 'Space-separated overlay names. Empty = skip Kustomize Build.')
-    string(name: 'GITOPS_DIR', defaultValue: 'gitops', description: 'GitOps overlays root. Empty = skip bump+push stages.')
-    string(name: 'VALUES_FILE', defaultValue: 'values.yaml', description: 'File under ${GITOPS_DIR}/${OVERLAY}/ to bump')
-    string(name: 'PROD_BRANCHES', defaultValue: 'main,master', description: 'CSV of branch names that build for prod')
-    string(name: 'STAGING_BRANCH', defaultValue: 'staging', description: 'Branch that builds for staging')
-    string(name: 'DEV_BRANCH', defaultValue: 'develop', description: 'Branch that builds for dev')
-    string(name: 'GIT_USER_NAME', defaultValue: 'jenkins-ci', description: 'GitOps commit author name')
-    string(name: 'GIT_USER_EMAIL', defaultValue: 'jenkins@local', description: 'GitOps commit author email')
-    string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push', description: 'Jenkins credential: GitHub user + PAT')
+    string(name: 'IMAGE_NAME', defaultValue: 'devops-demo-app', description: 'Docker image name')
+    string(name: 'APP_DIR', defaultValue: 'app', description: 'Application directory')
+    string(name: 'CHART_PATH', defaultValue: 'helm/devops-demo-app', description: 'Helm chart path')
+    string(name: 'GITOPS_DIR', defaultValue: 'gitops', description: 'GitOps overlays directory')
+    string(name: 'DOCKER_CREDENTIALS_ID', defaultValue: 'docker-registry', description: 'Jenkins username/password credential for Docker registry')
+    string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push', description: 'Jenkins username/password credential for Git push')
   }
 
   options {
@@ -38,255 +106,397 @@ npm test
     REGISTRY = "${params.REGISTRY}"
     IMAGE_NAME = "${params.IMAGE_NAME}"
     APP_DIR = "${params.APP_DIR}"
-    DOCKERFILE = "${params.DOCKERFILE}"
-    DOCKER_TARGET = "${params.DOCKER_TARGET}"
-    BUILD_CONTEXT_DIR = "${params.BUILD_CONTEXT_DIR}"
-    TEST_IMAGE = "${params.TEST_IMAGE}"
-    HELM_CHART = "${params.HELM_CHART}"
-    KUSTOMIZE_OVERLAYS = "${params.KUSTOMIZE_OVERLAYS}"
+    CHART_PATH = "${params.CHART_PATH}"
     GITOPS_DIR = "${params.GITOPS_DIR}"
-    VALUES_FILE = "${params.VALUES_FILE}"
-    SKIP = 'false'
+    SKIP_CI = 'false'
+    DO_PUSH = 'false'
+    DO_GITOPS_UPDATE = 'false'
+    REQUIRE_APPROVAL = 'false'
+    DEPLOY_FAILED = 'false'
+    GITOPS_COMMIT_CREATED = 'false'
   }
 
   stages {
-    stage('Checkout & Resolve Strategy') {
+    stage('Checkout') {
       steps {
         checkout scm
         script {
-          def shortSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          def commitMsg = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
-          def branch = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
-          def tag = env.TAG_NAME
-          def skipCi = commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')
+          env.SHORT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          env.SOURCE_BRANCH = env.CHANGE_BRANCH ?: env.BRANCH_NAME ?: sh(
+            script: 'git rev-parse --abbrev-ref HEAD',
+            returnStdout: true
+          ).trim()
+          env.SOURCE_TAG = env.TAG_NAME ?: ''
 
-          if (skipCi) {
-            env.SKIP = 'true'
+          def commitMessage = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim().toLowerCase()
+          if (commitMessage.contains('[skip ci]') || commitMessage.contains('[ci skip]')) {
+            env.SKIP_CI = 'true'
             currentBuild.result = 'NOT_BUILT'
-            currentBuild.description = 'skipped [skip ci]'
-            echo 'Commit is marked [skip ci] — skipping CI stages.'
-            return
+            currentBuild.description = 'skipped by commit message'
+            echo 'Commit message contains [skip ci] or [ci skip].'
           }
-
-          def prodBranches = params.PROD_BRANCHES.split(',').collect { it.trim() }.findAll { it }
-
-          def cfg
-          if (tag) {
-            cfg = [target: 'prod', push: true, bump: true, approval: true, overlay: 'prod', version: tag]
-          } else if (prodBranches.contains(branch)) {
-            cfg = [target: 'prod', push: true, bump: true, approval: true, overlay: 'prod', version: "prod-${env.BUILD_NUMBER}-${shortSha}"]
-          } else if (branch == params.STAGING_BRANCH) {
-            cfg = [target: 'staging', push: true, bump: true, approval: false, overlay: 'staging', version: "rc-${env.BUILD_NUMBER}-${shortSha}"]
-          } else if (branch == params.DEV_BRANCH) {
-            cfg = [target: 'dev', push: true, bump: true, approval: false, overlay: 'dev', version: "dev-${env.BUILD_NUMBER}-${shortSha}"]
-          } else if (branch.startsWith('release/')) {
-            def rc = branch.replaceFirst('release/', '').replaceAll('[^A-Za-z0-9._-]', '-')
-            cfg = [target: 'release', push: true, bump: false, approval: false, overlay: null, version: "rc-${rc}-${shortSha}"]
-          } else if (branch.startsWith('hotfix/')) {
-            def hf = branch.replaceFirst('hotfix/', '').replaceAll('[^A-Za-z0-9._-]', '-')
-            cfg = [target: 'hotfix', push: true, bump: false, approval: false, overlay: null, version: "hotfix-${hf}-${shortSha}"]
-          } else {
-            cfg = [target: 'feature', push: false, bump: false, approval: false, overlay: null, version: "feat-${env.BUILD_NUMBER}-${shortSha}"]
-          }
-
-          env.TARGET_ENV = cfg.target
-          env.DO_PUSH = cfg.push.toString()
-          env.DO_BUMP = cfg.bump.toString()
-          env.REQUIRE_APPROVAL = cfg.approval.toString()
-          env.OVERLAY = cfg.overlay ?: ''
-          env.VERSION = cfg.version
-          env.IMAGE = "${env.REGISTRY}/${env.IMAGE_NAME}:${cfg.version}"
-          env.GIT_BRANCH_NAME = branch
-
-          echo "--- Strategy ---"
-          echo "Branch=${branch}  Tag=${tag ?: '-'}  Target=${cfg.target}  Overlay=${cfg.overlay ?: '-'}"
-          echo "Image=${env.IMAGE}"
-          echo "Push=${cfg.push}  Bump=${cfg.bump}  Approval=${cfg.approval}"
-          currentBuild.description = "${cfg.target} ${env.VERSION}"
         }
       }
     }
 
-    stage('Test') {
-      when { expression { env.SKIP != 'true' } }
+    stage('Resolve Strategy') {
+      when { expression { env.SKIP_CI != 'true' } }
+      steps {
+        script {
+          def strategy = resolveStrategy(env.SOURCE_BRANCH, env.SOURCE_TAG, env.BUILD_NUMBER, env.SHORT_SHA)
+
+          env.TARGET_ENV = strategy.targetEnv
+          env.OVERLAY = strategy.overlay
+          env.IMAGE_TAG = strategy.imageTag
+          env.IMAGE = "${params.REGISTRY}/${params.IMAGE_NAME}:${strategy.imageTag}"
+          env.DO_PUSH = strategy.pushImage.toString()
+          env.DO_GITOPS_UPDATE = strategy.updateGitOps.toString()
+          env.REQUIRE_APPROVAL = strategy.requiresApproval.toString()
+          env.GITOPS_TARGET_BRANCH = strategy.gitopsBranch
+          env.VALUES_FILE_PATH = strategy.overlay ? "${params.GITOPS_DIR}/${strategy.overlay}/values.yaml" : ''
+
+          currentBuild.description = "${env.TARGET_ENV} ${env.IMAGE_TAG}"
+          echo "Branch: ${env.SOURCE_BRANCH}"
+          echo "Tag: ${env.SOURCE_TAG ?: '-'}"
+          echo "Image: ${env.IMAGE}"
+          echo "Overlay: ${env.OVERLAY ?: '-'}"
+          echo "Push image: ${env.DO_PUSH}"
+          echo "Update GitOps: ${env.DO_GITOPS_UPDATE}"
+          echo "Approval required: ${env.REQUIRE_APPROVAL}"
+        }
+      }
+    }
+
+    stage('Quality Gates') {
+      when { expression { env.SKIP_CI != 'true' } }
       parallel {
         stage('App Lint & Test') {
-          when { expression { params.TEST_SCRIPT?.trim() } }
           steps {
-            retry(2) {
-              script {
-                writeFile file: '.ci-test.sh', text: params.TEST_SCRIPT
-                sh '''
-                  set -eu
-                  docker run --rm \
-                    -v "$PWD/${APP_DIR}:/src:ro" \
-                    -v "$PWD/.ci-test.sh:/test.sh:ro" \
-                    -w /app \
-                    "${TEST_IMAGE}" sh /test.sh
-                '''
-              }
-            }
+            sh '''
+              set -eu
+              test -d "${APP_DIR}"
+              rm -rf .jenkins-app-test
+              mkdir -p .jenkins-app-test
+              cp -a "${APP_DIR}/." .jenkins-app-test/
+
+              docker run --rm \
+                -v "$PWD/.jenkins-app-test:/workspace" \
+                -w /workspace \
+                node:20-slim \
+                sh -ec 'npm ci && npm run lint && npm test'
+            '''
           }
         }
+
         stage('Helm Lint') {
-          when { expression { env.HELM_CHART?.trim() } }
           steps {
             sh '''
               set -eu
-              helm lint "${HELM_CHART}"
-              helm template lint-check "${HELM_CHART}" > /dev/null
+              test -d "${CHART_PATH}"
+              helm lint "${CHART_PATH}"
+              helm template lint-check "${CHART_PATH}" > /dev/null
             '''
           }
         }
-        stage('Kustomize Build') {
-          when {
-            allOf {
-              expression { env.KUSTOMIZE_OVERLAYS?.trim() }
-              expression { env.GITOPS_DIR?.trim() }
-            }
-          }
+
+        stage('Kustomize Render') {
           steps {
             sh '''
               set -eu
-              kubectl version --client=true >/dev/null
-              for overlay in ${KUSTOMIZE_OVERLAYS}; do
-                echo "--- Rendering ${GITOPS_DIR}/${overlay} ---"
-                kubectl kustomize --enable-helm "${GITOPS_DIR}/${overlay}" > /dev/null
+              test -d "${GITOPS_DIR}"
+
+              rendered=0
+              for overlay in dev staging prod; do
+                path="${GITOPS_DIR}/${overlay}"
+                if [ -d "${path}" ]; then
+                  kubectl kustomize --enable-helm "${path}" > /dev/null
+                  rendered=$((rendered + 1))
+                fi
               done
+
+              test "${rendered}" -gt 0
             '''
           }
         }
       }
     }
 
-    stage('Docker Build') {
-      when { expression { env.SKIP != 'true' } }
+    stage('Build Image') {
+      when { expression { env.SKIP_CI != 'true' } }
       steps {
-        retry(2) {
-          sh '''
-            set -eu
-            docker build --file "${DOCKERFILE}" --target "${DOCKER_TARGET}" \
-              --label ci.build="${BUILD_NUMBER}" \
-              --label ci.commit="$(git rev-parse --short HEAD)" \
-              --label ci.target="${TARGET_ENV}" \
-              --build-arg APP_VERSION="${VERSION}" \
-              -t "${IMAGE}" "${BUILD_CONTEXT_DIR}"
-          '''
-        }
+        sh '''
+          set -eu
+          docker build \
+            --file "${APP_DIR}/Dockerfile" \
+            --label ci.build="${BUILD_NUMBER}" \
+            --label ci.commit="${SHORT_SHA}" \
+            --label ci.target="${TARGET_ENV}" \
+            --build-arg APP_VERSION="${IMAGE_TAG}" \
+            --tag "${IMAGE}" \
+            "${APP_DIR}"
+        '''
       }
     }
 
-    stage('Image Push') {
+    stage('Scan Image if needed') {
+      when { expression { env.SKIP_CI != 'true' } }
+      steps {
+        sh '''
+          set -eu
+          if command -v trivy >/dev/null 2>&1; then
+            trivy image --exit-code 1 --severity HIGH,CRITICAL "${IMAGE}"
+          else
+            echo "trivy not installed; skipping image scan"
+          fi
+        '''
+      }
+    }
+
+    stage('Push Image') {
       when {
         allOf {
-          expression { env.SKIP != 'true' }
+          expression { env.SKIP_CI != 'true' }
           expression { env.DO_PUSH == 'true' }
         }
       }
       steps {
-        retry(2) {
-          sh 'docker push "${IMAGE}"'
-        }
-      }
-    }
-
-    stage('Production Approval') {
-      when {
-        allOf {
-          expression { env.SKIP != 'true' }
-          expression { env.DO_BUMP == 'true' }
-          expression { env.REQUIRE_APPROVAL == 'true' }
-        }
-      }
-      steps {
-        input message: "Promote ${env.IMAGE} to ${env.OVERLAY}?", ok: 'Promote'
-      }
-    }
-
-    stage('Bump GitOps Image Tag') {
-      when {
-        allOf {
-          expression { env.SKIP != 'true' }
-          expression { env.DO_BUMP == 'true' }
-          expression { env.GITOPS_DIR?.trim() }
-        }
-      }
-      steps {
-        script {
-          def valuesFile = "${env.GITOPS_DIR}/${env.OVERLAY}/${env.VALUES_FILE}"
-          sh """
-            set -eu
-            test -f "${valuesFile}"
-            tmp=\$(mktemp)
-            awk -v repo="${env.REGISTRY}/${env.IMAGE_NAME}" -v tag="${env.VERSION}" '
-              BEGIN { in_image=0 }
-              /^image:/ { in_image=1; print; next }
-              in_image && /^  repository:/ { print "  repository: " repo; next }
-              in_image && /^  tag:/ { print "  tag: " tag; next }
-              in_image && /^[^ ]/ { in_image=0 }
-              { print }
-            ' "${valuesFile}" > "\$tmp"
-            mv "\$tmp" "${valuesFile}"
-            echo "--- New ${valuesFile} ---"
-            sed -n '1,20p' "${valuesFile}"
-          """
-        }
-      }
-    }
-
-    stage('Commit & Push GitOps') {
-      when {
-        allOf {
-          expression { env.SKIP != 'true' }
-          expression { env.DO_BUMP == 'true' }
-          expression { env.GITOPS_DIR?.trim() }
-        }
-      }
-      steps {
-        withCredentials([usernamePassword(credentialsId: "${params.GIT_CREDENTIALS_ID}",
-                                          usernameVariable: 'GIT_USER',
-                                          passwordVariable: 'GIT_TOKEN')]) {
+        withCredentials([usernamePassword(
+          credentialsId: params.DOCKER_CREDENTIALS_ID,
+          usernameVariable: 'DOCKER_USERNAME',
+          passwordVariable: 'DOCKER_PASSWORD'
+        )]) {
           sh '''
             set -eu
-            git config user.name "${GIT_USER_NAME}"
-            git config user.email "${GIT_USER_EMAIL}"
-
-            target="${GITOPS_DIR}/${OVERLAY}/${VALUES_FILE}"
-            if git diff --quiet -- "${target}"; then
-              echo "No change in ${target} — nothing to commit."
-              exit 0
-            fi
-
-            git add "${target}"
-            git commit -m "ci(${OVERLAY}): bump ${IMAGE_NAME} to ${VERSION}"
-
-            remote_url=$(git config --get remote.origin.url)
-            push_url=$(echo "$remote_url" | sed -E "s#https://#https://${GIT_USER}:${GIT_TOKEN}@#")
-            gitops_branch="gitops/${OVERLAY}"
-
-            if git ls-remote --exit-code --heads "$push_url" "$gitops_branch" >/dev/null 2>&1; then
-              git push --force-with-lease "$push_url" "HEAD:refs/heads/${gitops_branch}"
-            else
-              git push "$push_url" "HEAD:refs/heads/${gitops_branch}"
-            fi
+            printf '%s' "${DOCKER_PASSWORD}" | docker login "${REGISTRY}" \
+              --username "${DOCKER_USERNAME}" \
+              --password-stdin
+            docker push "${IMAGE}"
           '''
         }
       }
     }
+
+    stage('Manual Approval') {
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_GITOPS_UPDATE == 'true' }
+          expression { env.REQUIRE_APPROVAL == 'true' }
+        }
+      }
+      steps {
+        input message: "Promote ${env.IMAGE} to ${env.TARGET_ENV}?", ok: 'Promote'
+      }
+    }
+
+    stage('Update GitOps') {
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_GITOPS_UPDATE == 'true' }
+        }
+      }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: params.GIT_CREDENTIALS_ID,
+          usernameVariable: 'GIT_USERNAME',
+          passwordVariable: 'GIT_PASSWORD'
+        )]) {
+          sh '''
+            set -eu
+            test -n "${GITOPS_TARGET_BRANCH}"
+            test -n "${VALUES_FILE_PATH}"
+
+            auth_header="$(printf '%s:%s' "${GIT_USERNAME}" "${GIT_PASSWORD}" | base64 | tr -d '\n')"
+            git -c http.extraHeader="Authorization: Basic ${auth_header}" fetch origin "${GITOPS_TARGET_BRANCH}"
+            git checkout -B "${GITOPS_TARGET_BRANCH}" FETCH_HEAD
+
+            test -f "${VALUES_FILE_PATH}"
+            image_repository="${REGISTRY}/${IMAGE_NAME}"
+
+            if command -v yq >/dev/null 2>&1; then
+              IMAGE_REPOSITORY="${image_repository}" yq -i \
+                '.image.repository = strenv(IMAGE_REPOSITORY) | .image.tag = strenv(IMAGE_TAG)' \
+                "${VALUES_FILE_PATH}"
+            else
+              tmp_file="$(mktemp)"
+              awk -v repository="${image_repository}" -v tag="${IMAGE_TAG}" '
+                /^image:[[:space:]]*$/ {
+                  in_image = 1
+                  print
+                  next
+                }
+                in_image && /^[^[:space:]]/ {
+                  in_image = 0
+                }
+                in_image && /^[[:space:]]+repository:/ {
+                  sub(/repository:.*/, "repository: " repository)
+                  print
+                  next
+                }
+                in_image && /^[[:space:]]+tag:/ {
+                  sub(/tag:.*/, "tag: " tag)
+                  print
+                  next
+                }
+                { print }
+              ' "${VALUES_FILE_PATH}" > "${tmp_file}"
+              mv "${tmp_file}" "${VALUES_FILE_PATH}"
+            fi
+
+            git diff -- "${VALUES_FILE_PATH}"
+          '''
+        }
+      }
+    }
+
+    stage('Commit GitOps') {
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_GITOPS_UPDATE == 'true' }
+        }
+      }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: params.GIT_CREDENTIALS_ID,
+          usernameVariable: 'GIT_USERNAME',
+          passwordVariable: 'GIT_PASSWORD'
+        )]) {
+          script {
+            if (sh(returnStatus: true, script: 'git diff --quiet -- "${VALUES_FILE_PATH}"') == 0) {
+              echo 'No GitOps change to commit.'
+              return
+            }
+
+            sh '''
+              set -eu
+              git config user.name "jenkins-ci"
+              git config user.email "jenkins-ci@local"
+              git add "${VALUES_FILE_PATH}"
+              git commit -m "ci(${OVERLAY}): bump ${IMAGE_NAME} to ${IMAGE_TAG} [skip ci]"
+
+              auth_header="$(printf '%s:%s' "${GIT_USERNAME}" "${GIT_PASSWORD}" | base64 | tr -d '\n')"
+              git -c http.extraHeader="Authorization: Basic ${auth_header}" pull --rebase origin "${GITOPS_TARGET_BRANCH}"
+            '''
+
+            env.GITOPS_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+            env.GITOPS_COMMIT_CREATED = 'true'
+
+            sh '''
+              set -eu
+              auth_header="$(printf '%s:%s' "${GIT_USERNAME}" "${GIT_PASSWORD}" | base64 | tr -d '\n')"
+              git -c http.extraHeader="Authorization: Basic ${auth_header}" push origin "HEAD:refs/heads/${GITOPS_TARGET_BRANCH}"
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Verify Deployment') {
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_GITOPS_UPDATE == 'true' }
+          expression { env.GITOPS_COMMIT_CREATED == 'true' }
+        }
+      }
+      steps {
+        script {
+          def status = sh(
+            returnStatus: true,
+            script: '''
+              set -eu
+              if ! command -v kubectl >/dev/null 2>&1; then
+                echo "kubectl not installed; skipping deployment verification"
+                exit 0
+              fi
+
+              namespace="${OVERLAY}"
+              if ! kubectl -n "${namespace}" get deploy "${IMAGE_NAME}" >/dev/null 2>&1; then
+                namespace="default"
+              fi
+
+              if ! kubectl -n "${namespace}" get deploy "${IMAGE_NAME}" >/dev/null 2>&1; then
+                echo "No deployment found for ${IMAGE_NAME}; skipping rollout verification"
+                exit 0
+              fi
+
+              kubectl -n "${namespace}" rollout status "deployment/${IMAGE_NAME}" --timeout=180s
+            '''
+          )
+
+          if (status != 0) {
+            env.DEPLOY_FAILED = 'true'
+            currentBuild.result = 'UNSTABLE'
+            echo 'Deployment verification failed. Manual rollback stage will run.'
+          }
+        }
+      }
+    }
+
+    stage('Manual Rollback') {
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_GITOPS_UPDATE == 'true' }
+          expression { env.GITOPS_COMMIT_CREATED == 'true' }
+          expression { env.DEPLOY_FAILED == 'true' }
+        }
+      }
+      steps {
+        input message: "Deployment failed. Roll back ${env.OVERLAY} to the previous image tag?", ok: 'Rollback'
+      }
+    }
+
+    stage('Rollback GitOps') {
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_GITOPS_UPDATE == 'true' }
+          expression { env.GITOPS_COMMIT_CREATED == 'true' }
+          expression { env.DEPLOY_FAILED == 'true' }
+        }
+      }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: params.GIT_CREDENTIALS_ID,
+          usernameVariable: 'GIT_USERNAME',
+          passwordVariable: 'GIT_PASSWORD'
+        )]) {
+          sh '''
+            set -eu
+            git config user.name "jenkins-ci"
+            git config user.email "jenkins-ci@local"
+
+            auth_header="$(printf '%s:%s' "${GIT_USERNAME}" "${GIT_PASSWORD}" | base64 | tr -d '\n')"
+            git -c http.extraHeader="Authorization: Basic ${auth_header}" fetch origin "${GITOPS_TARGET_BRANCH}"
+            git checkout -B "${GITOPS_TARGET_BRANCH}" FETCH_HEAD
+            git revert --no-commit "${GITOPS_COMMIT}"
+
+            if git diff --quiet -- "${VALUES_FILE_PATH}"; then
+              echo "No rollback change to commit."
+              exit 0
+            fi
+
+            git add "${VALUES_FILE_PATH}"
+            git commit -m "ci(${OVERLAY}): rollback ${IMAGE_NAME} after failed deploy [skip ci]"
+            git -c http.extraHeader="Authorization: Basic ${auth_header}" pull --rebase origin "${GITOPS_TARGET_BRANCH}"
+            git -c http.extraHeader="Authorization: Basic ${auth_header}" push origin "HEAD:refs/heads/${GITOPS_TARGET_BRANCH}"
+          '''
+        }
+      }
+    }
+
   }
 
   post {
-    success {
-      echo "SUCCESS [${env.TARGET_ENV}] image=${env.IMAGE} push=${env.DO_PUSH} bump=${env.DO_BUMP}"
-    }
-    failure {
-      echo "FAILURE [${env.TARGET_ENV}] version=${env.VERSION}"
-    }
     always {
       sh '''
-        if [ -n "${BUILD_NUMBER:-}" ]; then
-          docker image prune -f --filter "label=ci.build=${BUILD_NUMBER}" >/dev/null 2>&1 || true
-        fi
+        set +e
+        docker logout "${REGISTRY}" >/dev/null 2>&1
+        docker image prune -f --filter "label=ci.build=${BUILD_NUMBER}" >/dev/null 2>&1
+        rm -rf .jenkins-app-test
       '''
     }
   }
