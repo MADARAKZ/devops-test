@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: devops-demo
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: DevOps case study app — dev/staging/prod
+  sourceRepos:
+    - https://github.com/MADARAKZ/devops-test.git
+  destinations:
+    - namespace: devops-demo-dev
+      server: https://kubernetes.default.svc
+    - namespace: devops-demo-staging
+      server: https://kubernetes.default.svc
+    - namespace: devops-demo-prod
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: '*'
+      kind: '*'
+  orphanedResources:
+    warn: true

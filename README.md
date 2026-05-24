@@ -1,108 +1,166 @@
 # DevOps Engineer Case Study
 
-Solution for the DevOps Engineer case study.
+CI bằng Jenkins → Docker image; CD bằng ArgoCD pulling Kustomize+Helm overlays. Mỗi branch ánh xạ vào một môi trường.
 
-## What This Solution Covers
-
-- Jenkins Controller and Agent architecture
-- CI/CD pipeline with unit test, code quality, Docker build, image push, deploy, smoke test, and rollback
-- Dockerized Node.js demo application
-- Helm chart for Kubernetes deployment with probes, rolling update, resources, and replicas
-- Local demo using Docker Compose, local registry, and Minikube Cilium
-- Written report PDF and slide outline
-
-## Repository Layout
+## Repo layout
 
 ```text
 .
-|-- app/                         # Demo Node.js service
-|-- docker-compose.yml           # Jenkins, agent, registry, and app
-|-- Jenkinsfile                  # CI/CD pipeline
-|-- jenkins/                     # Jenkins images and JCasC template
-|-- helm/                        # Helm chart for Kubernetes deployment
-|-- scripts/                     # Helper scripts
-`-- docs/                        # Case study report and slide outline
+├── app/                              Demo Node.js service + Dockerfile
+├── helm/devops-demo-app/              Base Helm chart (Deployment, Service, ConfigMap, …)
+├── gitops/
+│   ├── dev/      kustomization.yaml + values.yaml   # ArgoCD source for devops-demo-dev
+│   ├── staging/  kustomization.yaml + values.yaml   # ArgoCD source for devops-demo-staging
+│   └── prod/     kustomization.yaml + values.yaml   # ArgoCD source for devops-demo-prod
+├── argocd/
+│   ├── project.yaml                                # AppProject scoping the 3 envs
+│   ├── application-dev.yaml                        # auto-sync, prune, selfHeal
+│   ├── application-staging.yaml                    # auto-sync, prune, selfHeal
+│   └── application-prod.yaml                       # manual sync (approval gate)
+├── jenkins/{controller,agent}/        Jenkins images + JCasC
+├── scripts/                           start-local.sh, create-polling-job.sh, minikube-cilium.sh
+├── docker-compose.yml                 Jenkins + agent + registry + demo app
+└── Jenkinsfile                        CI + GitOps bump
 ```
 
-## Quick Start
+## Gitflow → environment matrix
 
-Use the startup script instead of running `docker compose up` directly. The script generates local-only Jenkins SSH credentials and renders the JCasC file required by the controller.
+| Branch / Ref     | Image tag pattern            | docker push | bump gitops/  | ArgoCD app           | Approval |
+|------------------|------------------------------|-------------|---------------|----------------------|----------|
+| `feature/*`      | `feat-<build>-<sha>`         | —           | —             | —                    | —        |
+| `develop`        | `dev-<build>-<sha>`          | ✓           | `gitops/dev`      | auto-sync            | —        |
+| `release/*`      | `rc-<name>-<sha>`            | ✓           | —             | (manual promote)     | —        |
+| `staging`        | `rc-<build>-<sha>`           | ✓           | `gitops/staging`  | auto-sync            | —        |
+| `hotfix/*`       | `hotfix-<name>-<sha>`        | ✓           | —             | (manual promote)     | —        |
+| `main`           | `prod-<build>-<sha>`         | ✓           | `gitops/prod`     | manual sync          | ✓        |
+| tag `v*`         | `<tag>` (e.g. `v1.0.0`)       | ✓           | `gitops/prod`     | manual sync          | ✓        |
+
+Merge flow:
+
+```text
+feature/x ──► develop ──► staging ──► main ──► tag vX.Y.Z
+                                ▲
+                                └── release/X.Y  (cut from develop, fix-only)
+hotfix/x ─────────────────────────► main  (also merge back to develop)
+```
+
+## End-to-end loop
+
+```text
+git push origin <branch>
+        │
+        ▼
+ GitHub commits land
+        │
+        ▼
+ Jenkins polls every ~2 min  (jobs created from scripts/create-polling-job.sh)
+        │ checkout / test / docker build
+        │ push image to registry  (develop/staging/main/release/hotfix/tag)
+        │ bump gitops/<env>/values.yaml.image.tag and push commit  (develop/staging/main/tag)
+        ▼
+ GitHub now has the new image tag in gitops/<env>/values.yaml
+        │
+        ▼
+ ArgoCD detects out-of-sync (auto for dev/staging, manual for prod)
+        │ renders kustomize+helm overlay
+        ▼
+ Kubernetes namespace devops-demo-<env> rolls out the new image
+```
+
+Loop protection: Jenkins commits its GitOps bumps with `[skip ci]` in the message. Jenkins stage 1 reads the commit message and aborts when it sees that marker, so a bump commit never re-enters CI.
+
+## Local prerequisites
+
+1. Docker / Docker Compose.
+2. Optional, for actually testing ArgoCD locally: Minikube + ArgoCD installed in the cluster (see `scripts/minikube-cilium.sh start`).
+
+## Start Jenkins + registry + demo app
 
 ```bash
 chmod +x scripts/*.sh
-./scripts/start-local.sh
+./scripts/start-local.sh           # builds & runs jenkins-controller, jenkins-agent, registry, demo-app
+# Jenkins:  http://localhost:8080    admin / admin123
 ```
 
-Jenkins:
+## Wire Jenkins to GitHub
 
-```text
-URL: http://localhost:8080
-Username: admin
-Password: admin123
-```
+1. Create or reuse a GitHub Personal Access Token with `repo` scope.
+2. In Jenkins → **Manage Jenkins → Credentials → System → Global**, add:
+   - Kind: **Username with password**
+   - Scope: Global
+   - Username: your GitHub username (e.g. `MADARAKZ`)
+   - Password: the PAT
+   - ID: **`github-push`**  (this matches the default `params.GIT_CREDENTIALS_ID`)
+3. Create a pipeline job that polls the repo:
 
-Demo app:
+   ```bash
+   ./scripts/create-polling-job.sh https://github.com/<owner>/<repo>.git main
+   ```
+
+   Repeat (or use a Multibranch job) for `develop`, `staging`, etc., or set up one Multibranch Pipeline.
+
+## Install ArgoCD applications
+
+After ArgoCD is running in the cluster:
 
 ```bash
-curl http://localhost:3000/health
+kubectl apply -n argocd -f argocd/project.yaml
+kubectl apply -n argocd -f argocd/application-dev.yaml
+kubectl apply -n argocd -f argocd/application-staging.yaml
+kubectl apply -n argocd -f argocd/application-prod.yaml
 ```
 
-## GitHub Polling Pipeline
+ArgoCD now watches `gitops/dev`, `gitops/staging`, `gitops/prod`. Dev/staging auto-sync on every commit; prod waits for a manual sync in the ArgoCD UI/CLI.
 
-Push this repository to GitHub, then create a Jenkins Pipeline job that polls GitHub for changes:
+## Demo a full flow
 
 ```bash
-./scripts/create-polling-job.sh https://github.com/your-user/devops-case-study.git main
+git checkout -b feature/say-hello
+echo "hello" >> app/readme.md
+git commit -am "feature: greet the user"
+git push origin feature/say-hello
+# Jenkins runs test + build (no push, no bump). ArgoCD untouched.
+
+# Promote into the dev environment
+git checkout develop
+git merge feature/say-hello
+git push origin develop
+# Jenkins runs test + build + push + bumps gitops/dev/values.yaml + commits with [skip ci].
+# ArgoCD dev application detects new image tag and rolls it out to namespace devops-demo-dev.
+
+# Promote to staging, then production:
+git checkout staging && git merge develop && git push origin staging
+git checkout main    && git merge staging && git push origin main
+# main build requires manual approval in Jenkins before it bumps gitops/prod.
+# Even after the bump, ArgoCD prod waits for manual sync.
+
+# Cut a release tag
+git tag -a v1.0.0 -m "first release"
+git push origin v1.0.0
+# Image tagged v1.0.0 is pushed; gitops/prod is bumped (with approval) to image.tag=v1.0.0.
 ```
 
-By default the job is named `devops-case-study` and uses:
+## Rollback
 
-```text
-Poll SCM: H/2 * * * *
-Script Path: Jenkinsfile
-Agent Label: docker-agent
-```
-
-With this setup, the flow is:
-
-```text
-git push to GitHub
-  -> Jenkins polls GitHub every few minutes
-  -> Jenkins Controller detects a new commit
-  -> Jenkins Agent runs Jenkinsfile
-  -> Jenkins tests the app, builds the image, pushes to localhost:5000, and runs deploy mock
-```
-
-You can customize the job name and poll schedule:
+GitOps rollback is a `git revert`:
 
 ```bash
-JOB_NAME=my-pipeline POLL_SCHEDULE="H/5 * * * *" ./scripts/create-polling-job.sh https://github.com/your-user/devops-case-study.git main
+git revert <bump-commit> -m "revert: rollback prod to previous image"
+git push origin main
+# ArgoCD reconciles back to the previous image tag.
 ```
 
-## Minikube + Cilium Demo
-
-Start a local Kubernetes cluster with one control-plane node, two worker nodes, containerd, and Cilium CNI:
+Or in ArgoCD CLI:
 
 ```bash
-./scripts/minikube-cilium.sh start
+argocd app history devops-demo-prod
+argocd app rollback devops-demo-prod <history-id>
 ```
 
-Deploy the demo app to that cluster:
+## Files of interest
 
-```bash
-./scripts/minikube-cilium.sh deploy
-helm status devops-demo-app -n devops-demo
-kubectl get pods,svc -n devops-demo -o wide
-```
-
-The report PDF for submission is generated at:
-
-```text
-docs/DevOps_CaseStudy_Report.pdf
-```
-
-## Case Study Documents
-
-- Report PDF: `docs/DevOps_CaseStudy_Report.pdf`
-- Report source: `docs/DevOps_CaseStudy_Report.md`
-- Slide outline: `docs/slide-outline.md`
+- `Jenkinsfile`                            — CI + image tag bump back to repo.
+- `helm/devops-demo-app/values.yaml`        — chart defaults (security context, probes, …).
+- `gitops/<env>/values.yaml`               — per-env overrides; the `image.tag` is what Jenkins rewrites.
+- `gitops/<env>/kustomization.yaml`         — `helmCharts:` + `helmGlobals.chartHome: ../../helm`.
+- `argocd/application-<env>.yaml`           — sets ArgoCD source path + sync policy.

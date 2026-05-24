@@ -4,12 +4,11 @@ pipeline {
   parameters {
     string(name: 'REGISTRY',     defaultValue: 'localhost:5000',           description: 'Docker registry host:port')
     string(name: 'IMAGE_NAME',   defaultValue: 'devops-demo-app',          description: 'Image name (without registry)')
-    choice(name: 'DEPLOY_MODE',  choices: ['mock', 'helm'],                description: 'mock = print commands only; helm = real rollout')
-    string(name: 'NAMESPACE',    defaultValue: 'devops-demo',              description: 'Kubernetes namespace')
-    string(name: 'RELEASE',      defaultValue: 'devops-demo-app',          description: 'Helm release name')
     string(name: 'CHART_PATH',   defaultValue: 'helm/devops-demo-app',     description: 'Helm chart directory')
-    string(name: 'APP_PORT',     defaultValue: '8080',                     description: 'Container port')
-    booleanParam(name: 'PROD_APPROVAL', defaultValue: true,                description: 'Require manual approval for prod deploy')
+    string(name: 'GITOPS_DIR',   defaultValue: 'gitops',                   description: 'Root of GitOps overlays')
+    string(name: 'GIT_USER_NAME',  defaultValue: 'jenkins-ci',             description: 'Author name for GitOps commits')
+    string(name: 'GIT_USER_EMAIL', defaultValue: 'jenkins@local',          description: 'Author email for GitOps commits')
+    string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push',        description: 'Jenkins credential ID with GitHub username + PAT')
   }
 
   options {
@@ -23,25 +22,66 @@ pipeline {
     APP_DIR     = 'app'
     REGISTRY    = "${params.REGISTRY}"
     IMAGE_NAME  = "${params.IMAGE_NAME}"
-    NAMESPACE   = "${params.NAMESPACE}"
-    RELEASE     = "${params.RELEASE}"
     CHART_PATH  = "${params.CHART_PATH}"
-    APP_PORT    = "${params.APP_PORT}"
-    DEPLOY_MODE = "${params.DEPLOY_MODE}"
+    GITOPS_DIR  = "${params.GITOPS_DIR}"
   }
 
   stages {
 
-    stage('Checkout') {
+    stage('Checkout & Resolve Strategy') {
       steps {
         checkout scm
         script {
-          def shortSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          def branch   = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
-          env.VERSION  = "${env.BUILD_NUMBER}-${shortSha}"
-          env.IMAGE    = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.VERSION}"
-          env.IS_PROD  = (branch == 'main' || branch == 'master') ? 'true' : 'false'
-          echo "Branch=${branch} Version=${env.VERSION} Image=${env.IMAGE} IsProd=${env.IS_PROD}"
+          def shortSha   = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          def commitMsg  = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
+          def branch     = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+          def tag        = env.TAG_NAME
+
+          if (commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')) {
+            currentBuild.result = 'NOT_BUILT'
+            error("Commit is marked [skip ci] — skipping.")
+          }
+
+          def cfg
+          if (tag) {
+            cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod', version: tag]
+          } else if (branch == 'main' || branch == 'master') {
+            cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod',
+                   version: "prod-${env.BUILD_NUMBER}-${shortSha}"]
+          } else if (branch == 'staging') {
+            cfg = [target:'staging', push:true, bump:true, approval:false, overlay:'staging',
+                   version: "rc-${env.BUILD_NUMBER}-${shortSha}"]
+          } else if (branch == 'develop') {
+            cfg = [target:'dev', push:true, bump:true, approval:false, overlay:'dev',
+                   version: "dev-${env.BUILD_NUMBER}-${shortSha}"]
+          } else if (branch.startsWith('release/')) {
+            def rc = branch.replaceFirst('release/', '').replaceAll('[^A-Za-z0-9._-]', '-')
+            cfg = [target:'release', push:true, bump:false, approval:false, overlay:null,
+                   version: "rc-${rc}-${shortSha}"]
+          } else if (branch.startsWith('hotfix/')) {
+            def hf = branch.replaceFirst('hotfix/', '').replaceAll('[^A-Za-z0-9._-]', '-')
+            cfg = [target:'hotfix', push:true, bump:false, approval:false, overlay:null,
+                   version: "hotfix-${hf}-${shortSha}"]
+          } else {
+            cfg = [target:'feature', push:false, bump:false, approval:false, overlay:null,
+                   version: "feat-${env.BUILD_NUMBER}-${shortSha}"]
+          }
+
+          env.TARGET_ENV       = cfg.target
+          env.DO_PUSH          = cfg.push.toString()
+          env.DO_BUMP          = cfg.bump.toString()
+          env.REQUIRE_APPROVAL = cfg.approval.toString()
+          env.OVERLAY          = cfg.overlay ?: ''
+          env.VERSION          = cfg.version
+          env.IMAGE            = "${env.REGISTRY}/${env.IMAGE_NAME}:${cfg.version}"
+          env.GIT_BRANCH_NAME  = branch
+          env.GIT_TAG_NAME     = tag ?: ''
+
+          echo "--- Strategy ---"
+          echo "Branch=${branch}  Tag=${tag ?: '-'}  Target=${cfg.target}  Overlay=${cfg.overlay ?: '-'}"
+          echo "Image=${env.IMAGE}"
+          echo "Push=${cfg.push}  Bump=${cfg.bump}  Approval=${cfg.approval}"
+          currentBuild.description = "${cfg.target} ${env.VERSION}"
         }
       }
     }
@@ -62,7 +102,19 @@ pipeline {
             sh '''
               set -eu
               helm lint "${CHART_PATH}"
-              helm template "${RELEASE}-lint" "${CHART_PATH}" > /dev/null
+              helm template lint-check "${CHART_PATH}" > /dev/null
+            '''
+          }
+        }
+        stage('Kustomize Build') {
+          steps {
+            sh '''
+              set -eu
+              kubectl version --client=true >/dev/null
+              for overlay in dev staging prod; do
+                echo "--- Rendering ${GITOPS_DIR}/${overlay} ---"
+                kubectl kustomize --enable-helm "${GITOPS_DIR}/${overlay}" > /dev/null
+              done
             '''
           }
         }
@@ -76,6 +128,7 @@ pipeline {
           docker build --file "${APP_DIR}/Dockerfile" --target runtime \
             --label ci.build="${BUILD_NUMBER}" \
             --label ci.commit="$(git rev-parse --short HEAD)" \
+            --label ci.target="${TARGET_ENV}" \
             --build-arg APP_VERSION="${VERSION}" \
             -t "${IMAGE}" "${APP_DIR}"
         '''
@@ -83,6 +136,7 @@ pipeline {
     }
 
     stage('Image Push') {
+      when { expression { env.DO_PUSH == 'true' } }
       steps {
         sh '''
           set -eu
@@ -94,64 +148,62 @@ pipeline {
     stage('Production Approval') {
       when {
         allOf {
-          expression { return env.IS_PROD == 'true' }
-          expression { return params.PROD_APPROVAL }
-          expression { return env.DEPLOY_MODE == 'helm' }
+          expression { env.DO_BUMP == 'true' }
+          expression { env.REQUIRE_APPROVAL == 'true' }
         }
       }
       steps {
-        input message: "Deploy ${env.IMAGE} to production?", ok: 'Deploy'
+        input message: "Promote ${env.IMAGE} to ${env.OVERLAY}?", ok: 'Promote'
       }
     }
 
-    stage('Deploy') {
+    stage('Bump GitOps Image Tag') {
+      when { expression { env.DO_BUMP == 'true' } }
       steps {
         script {
-          def cmd = """\
-helm upgrade --install ${env.RELEASE} ${env.CHART_PATH} \\
-  --namespace ${env.NAMESPACE} \\
-  --create-namespace \\
-  --set image.repository=${env.REGISTRY}/${env.IMAGE_NAME} \\
-  --set image.tag=${env.VERSION} \\
-  --set config.data.PORT=${env.APP_PORT} \\
-  --set deployment.strategy.type=RollingUpdate \\
-  --set deployment.strategy.rollingUpdate.maxUnavailable=0 \\
-  --set deployment.strategy.rollingUpdate.maxSurge=1
-""".stripIndent()
-          writeFile file: 'deploy-command.txt', text: cmd
-
-          if (env.DEPLOY_MODE == 'helm') {
-            sh cmd
-            sh "kubectl rollout status deployment/${env.RELEASE} -n ${env.NAMESPACE} --timeout=180s"
-          } else {
-            echo "[mock] Would execute:\n${cmd}"
-          }
+          def valuesFile = "${env.GITOPS_DIR}/${env.OVERLAY}/values.yaml"
+          sh """
+            set -eu
+            test -f "${valuesFile}"
+            tmp=\$(mktemp)
+            awk -v repo="${env.REGISTRY}/${env.IMAGE_NAME}" -v tag="${env.VERSION}" '
+              BEGIN { in_image=0 }
+              /^image:/ { in_image=1; print; next }
+              in_image && /^  repository:/ { print "  repository: " repo; next }
+              in_image && /^  tag:/         { print "  tag: " tag; next }
+              in_image && /^[^ ]/ { in_image=0 }
+              { print }
+            ' "${valuesFile}" > "\$tmp"
+            mv "\$tmp" "${valuesFile}"
+            echo "--- New ${valuesFile} ---"
+            sed -n '1,20p' "${valuesFile}"
+          """
         }
       }
     }
 
-    stage('Smoke Test') {
+    stage('Commit & Push GitOps') {
+      when { expression { env.DO_BUMP == 'true' } }
       steps {
-        script {
-          if (env.DEPLOY_MODE != 'helm') {
-            echo "[mock] Skipping smoke test (DEPLOY_MODE=${env.DEPLOY_MODE})."
-            return
-          }
+        withCredentials([usernamePassword(credentialsId: "${params.GIT_CREDENTIALS_ID}",
+                                          usernameVariable: 'GIT_USER',
+                                          passwordVariable: 'GIT_TOKEN')]) {
           sh '''
             set -eu
-            for i in 1 2 3 4 5; do
-              if kubectl exec "deployment/${RELEASE}" -n "${NAMESPACE}" -- \
-                   wget -qO- "http://localhost:${APP_PORT}/health" \
-                   | tee smoke-test.log \
-                   | grep -q '"status":"ok"'; then
-                echo "Smoke test passed on attempt $i."
-                exit 0
-              fi
-              echo "Attempt $i failed; retrying in 5s..."
-              sleep 5
-            done
-            echo "Smoke test failed."
-            exit 1
+            git config user.name  "${GIT_USER_NAME}"
+            git config user.email "${GIT_USER_EMAIL}"
+
+            if git diff --quiet -- "${GITOPS_DIR}/${OVERLAY}/values.yaml"; then
+              echo "No change in ${GITOPS_DIR}/${OVERLAY}/values.yaml — nothing to commit."
+              exit 0
+            fi
+
+            git add "${GITOPS_DIR}/${OVERLAY}/values.yaml"
+            git commit -m "ci(${OVERLAY}): bump ${IMAGE_NAME} to ${VERSION} [skip ci]"
+
+            remote_url=$(git config --get remote.origin.url)
+            push_url=$(echo "$remote_url" | sed -E "s#https://#https://${GIT_USER}:${GIT_TOKEN}@#")
+            git push "$push_url" "HEAD:${GIT_BRANCH_NAME}"
           '''
         }
       }
@@ -160,34 +212,11 @@ helm upgrade --install ${env.RELEASE} ${env.CHART_PATH} \\
 
   post {
     success {
-      echo "SUCCESS: ${env.IMAGE} deployed (mode=${env.DEPLOY_MODE})"
+      echo "SUCCESS [${env.TARGET_ENV}] image=${env.IMAGE} push=${env.DO_PUSH} bump=${env.DO_BUMP}"
     }
-
     failure {
-      script {
-        echo 'FAILURE: attempting auto-rollback if applicable.'
-        if (env.DEPLOY_MODE != 'helm') {
-          echo "DEPLOY_MODE=${env.DEPLOY_MODE}; nothing to roll back."
-          return
-        }
-        def revisions = sh(
-          script: "helm history ${env.RELEASE} -n ${env.NAMESPACE} -o json 2>/dev/null | grep -c '\"revision\"' || true",
-          returnStdout: true
-        ).trim().toInteger()
-        if (revisions < 2) {
-          echo "Only ${revisions} revision(s) for ${env.RELEASE}; no rollback target."
-          return
-        }
-        echo "Rolling back ${env.RELEASE} in namespace ${env.NAMESPACE}..."
-        sh '''
-          set -eu
-          helm rollback "${RELEASE}" -n "${NAMESPACE}"
-          kubectl rollout status "deployment/${RELEASE}" -n "${NAMESPACE}" --timeout=120s
-          helm history "${RELEASE}" -n "${NAMESPACE}"
-        '''
-      }
+      echo "FAILURE [${env.TARGET_ENV}] version=${env.VERSION}"
     }
-
     always {
       sh '''
         if [ -n "${IMAGE_NAME:-}" ] && [ -n "${BUILD_NUMBER:-}" ]; then
@@ -195,7 +224,6 @@ helm upgrade --install ${env.RELEASE} ${env.CHART_PATH} \\
           docker image prune -f --filter "label=ci.build=${BUILD_NUMBER}" >/dev/null 2>&1 || true
         fi
       '''
-      archiveArtifacts artifacts: 'deploy-command.txt,smoke-test.log', allowEmptyArchive: true
     }
   }
 }

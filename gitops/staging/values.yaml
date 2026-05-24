@@ -1,0 +1,35 @@
+image:
+  repository: localhost:5000/devops-demo-app
+  tag: staging-bootstrap
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+config:
+  enabled: true
+  data:
+    NODE_ENV: production
+    PORT: "8080"
+    APP_ENV: staging
+
+deployment:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
