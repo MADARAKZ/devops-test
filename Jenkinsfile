@@ -265,9 +265,9 @@ npm test
             gitops_branch="gitops/${OVERLAY}"
 
             if git ls-remote --exit-code --heads "$push_url" "$gitops_branch" >/dev/null 2>&1; then
-              git push --force-with-lease "$push_url" "HEAD:${gitops_branch}"
+              git push --force-with-lease "$push_url" "HEAD:refs/heads/${gitops_branch}"
             else
-              git push "$push_url" "HEAD:${gitops_branch}"
+              git push "$push_url" "HEAD:refs/heads/${gitops_branch}"
             fi
           '''
         }
