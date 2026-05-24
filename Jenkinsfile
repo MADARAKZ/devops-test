@@ -486,7 +486,7 @@ pipeline {
             test -n "${rollback_commit}"
             git revert --no-commit "${rollback_commit}"
 
-            if git diff --quiet -- "${VALUES_FILE_PATH}"; then
+            if git diff --quiet -- "${VALUES_FILE_PATH}" && git diff --cached --quiet -- "${VALUES_FILE_PATH}"; then
               echo "No rollback change to commit."
               exit 0
             fi
