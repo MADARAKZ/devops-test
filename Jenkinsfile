@@ -24,7 +24,6 @@ pipeline {
     IMAGE_NAME  = "${params.IMAGE_NAME}"
     CHART_PATH  = "${params.CHART_PATH}"
     GITOPS_DIR  = "${params.GITOPS_DIR}"
-    SKIP_CI     = 'false'
   }
 
   stages {
@@ -39,14 +38,15 @@ pipeline {
           def tag        = env.TAG_NAME
           def skipCi     = commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')
 
-          def cfg
           if (skipCi) {
             currentBuild.result = 'NOT_BUILT'
             currentBuild.description = 'skipped [skip ci]'
             echo 'Commit is marked [skip ci] — skipping CI stages.'
-            cfg = [target:'skip', push:false, bump:false, approval:false, overlay:null,
-                   version: "skip-${env.BUILD_NUMBER}-${shortSha}"]
-          } else if (tag) {
+            return
+          }
+
+          def cfg
+          if (tag) {
             cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod', version: tag]
           } else if (branch == 'main' || branch == 'master') {
             cfg = [target:'prod', push:true, bump:true, approval:true, overlay:'prod',
@@ -71,7 +71,6 @@ pipeline {
           }
 
           env.TARGET_ENV       = cfg.target
-          env.SKIP_CI          = skipCi.toString()
           env.DO_PUSH          = cfg.push.toString()
           env.DO_BUMP          = cfg.bump.toString()
           env.REQUIRE_APPROVAL = cfg.approval.toString()
@@ -79,7 +78,6 @@ pipeline {
           env.VERSION          = cfg.version
           env.IMAGE            = "${env.REGISTRY}/${env.IMAGE_NAME}:${cfg.version}"
           env.GIT_BRANCH_NAME  = branch
-          env.GIT_TAG_NAME     = tag ?: ''
 
           echo "--- Strategy ---"
           echo "Branch=${branch}  Tag=${tag ?: '-'}  Target=${cfg.target}  Overlay=${cfg.overlay ?: '-'}"
@@ -91,15 +89,18 @@ pipeline {
     }
 
     stage('Test') {
-      when { expression { env.TARGET_ENV != 'skip' } }
+      when { expression { currentBuild.result != 'NOT_BUILT' } }
       parallel {
-        stage('Unit Test') {
+        stage('App Lint & Test') {
           steps {
             retry(2) {
               sh '''
                 set -eu
-                docker build --file "${APP_DIR}/Dockerfile" --target test \
-                  -t "${IMAGE_NAME}:test-${BUILD_NUMBER}" "${APP_DIR}"
+                docker run --rm \
+                  -v "$PWD/${APP_DIR}:/workspace:ro" \
+                  -w /tmp/app \
+                  node:20-slim \
+                  sh -c 'cp -a /workspace/. . && npm ci && npm run lint && npm test'
               '''
             }
           }
@@ -129,7 +130,7 @@ pipeline {
     }
 
     stage('Docker Build') {
-      when { expression { env.TARGET_ENV != 'skip' } }
+      when { expression { currentBuild.result != 'NOT_BUILT' } }
       steps {
         retry(2) {
           sh '''
@@ -148,7 +149,7 @@ pipeline {
     stage('Image Push') {
       when {
         allOf {
-          expression { env.SKIP_CI != 'true' }
+          expression { currentBuild.result != 'NOT_BUILT' }
           expression { env.DO_PUSH == 'true' }
         }
       }
@@ -167,7 +168,7 @@ pipeline {
         allOf {
           expression { env.DO_BUMP == 'true' }
           expression { env.REQUIRE_APPROVAL == 'true' }
-          expression { env.SKIP_CI != 'true' }
+          expression { currentBuild.result != 'NOT_BUILT' }
         }
       }
       steps {
@@ -178,7 +179,7 @@ pipeline {
     stage('Bump GitOps Image Tag') {
       when {
         allOf {
-          expression { env.SKIP_CI != 'true' }
+          expression { currentBuild.result != 'NOT_BUILT' }
           expression { env.DO_BUMP == 'true' }
         }
       }
@@ -208,7 +209,7 @@ pipeline {
     stage('Commit & Push GitOps') {
       when {
         allOf {
-          expression { env.SKIP_CI != 'true' }
+          expression { currentBuild.result != 'NOT_BUILT' }
           expression { env.DO_BUMP == 'true' }
         }
       }
@@ -249,8 +250,7 @@ pipeline {
     }
     always {
       sh '''
-        if [ -n "${IMAGE_NAME:-}" ] && [ -n "${BUILD_NUMBER:-}" ]; then
-          docker rmi "${IMAGE_NAME}:test-${BUILD_NUMBER}" >/dev/null 2>&1 || true
+        if [ -n "${BUILD_NUMBER:-}" ]; then
           docker image prune -f --filter "label=ci.build=${BUILD_NUMBER}" >/dev/null 2>&1 || true
         fi
       '''

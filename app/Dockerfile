@@ -1,10 +1,3 @@
-FROM node:20-slim AS test
-WORKDIR /usr/src/app
-COPY package*.json ./
-RUN npm ci
-COPY . .
-RUN npm test
-
 FROM node:20-slim AS dependencies
 WORKDIR /usr/src/app
 COPY package*.json ./
