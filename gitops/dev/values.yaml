@@ -1,6 +1,6 @@
 image:
   repository: localhost:5000/devops-demo-app
-  tag: dev-21-839b1b7
+  tag: dev-24-ec1b52d
   pullPolicy: IfNotPresent
 
 replicaCount: 1
