@@ -2,13 +2,13 @@ pipeline {
   agent { label 'docker-agent' }
 
   parameters {
-    string(name: 'REGISTRY',     defaultValue: 'localhost:5000',           description: 'Docker registry host:port')
-    string(name: 'IMAGE_NAME',   defaultValue: 'devops-demo-app',          description: 'Image name (without registry)')
-    string(name: 'CHART_PATH',   defaultValue: 'helm/devops-demo-app',     description: 'Helm chart directory')
-    string(name: 'GITOPS_DIR',   defaultValue: 'gitops',                   description: 'Root of GitOps overlays')
-    string(name: 'GIT_USER_NAME',  defaultValue: 'jenkins-ci',             description: 'Author name for GitOps commits')
-    string(name: 'GIT_USER_EMAIL', defaultValue: 'jenkins@local',          description: 'Author email for GitOps commits')
-    string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push',        description: 'Jenkins credential ID with GitHub username + PAT')
+    string(name: 'REGISTRY', defaultValue: 'localhost:5000', description: 'Docker registry host:port')
+    string(name: 'IMAGE_NAME', defaultValue: 'devops-demo-app', description: 'Image name')
+    string(name: 'CHART_PATH', defaultValue: 'helm/devops-demo-app', description: 'Helm chart directory')
+    string(name: 'GITOPS_DIR', defaultValue: 'gitops', description: 'GitOps overlays root')
+    string(name: 'GIT_USER_NAME', defaultValue: 'jenkins-ci', description: 'GitOps commit author name')
+    string(name: 'GIT_USER_EMAIL', defaultValue: 'jenkins@local', description: 'GitOps commit author email')
+    string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push', description: 'Jenkins credential: GitHub user + PAT')
   }
 
   options {
