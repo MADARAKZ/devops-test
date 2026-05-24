@@ -24,6 +24,7 @@ pipeline {
     IMAGE_NAME  = "${params.IMAGE_NAME}"
     CHART_PATH  = "${params.CHART_PATH}"
     GITOPS_DIR  = "${params.GITOPS_DIR}"
+    SKIP_CI     = 'false'
   }
 
   stages {
@@ -38,8 +39,11 @@ pipeline {
           def tag        = env.TAG_NAME
 
           if (commitMsg.contains('[skip ci]') || commitMsg.contains('[ci skip]')) {
+            env.SKIP_CI = 'true'
             currentBuild.result = 'NOT_BUILT'
-            error("Commit is marked [skip ci] — skipping.")
+            currentBuild.description = 'skipped [skip ci]'
+            echo 'Commit is marked [skip ci] — skipping CI stages.'
+            return
           }
 
           def cfg
@@ -87,6 +91,7 @@ pipeline {
     }
 
     stage('Test') {
+      when { expression { env.SKIP_CI != 'true' } }
       parallel {
         stage('Unit Test') {
           steps {
@@ -122,6 +127,7 @@ pipeline {
     }
 
     stage('Docker Build') {
+      when { expression { env.SKIP_CI != 'true' } }
       steps {
         sh '''
           set -eu
@@ -136,7 +142,12 @@ pipeline {
     }
 
     stage('Image Push') {
-      when { expression { env.DO_PUSH == 'true' } }
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_PUSH == 'true' }
+        }
+      }
       steps {
         sh '''
           set -eu
@@ -150,6 +161,7 @@ pipeline {
         allOf {
           expression { env.DO_BUMP == 'true' }
           expression { env.REQUIRE_APPROVAL == 'true' }
+          expression { env.SKIP_CI != 'true' }
         }
       }
       steps {
@@ -158,7 +170,12 @@ pipeline {
     }
 
     stage('Bump GitOps Image Tag') {
-      when { expression { env.DO_BUMP == 'true' } }
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_BUMP == 'true' }
+        }
+      }
       steps {
         script {
           def valuesFile = "${env.GITOPS_DIR}/${env.OVERLAY}/values.yaml"
@@ -183,7 +200,12 @@ pipeline {
     }
 
     stage('Commit & Push GitOps') {
-      when { expression { env.DO_BUMP == 'true' } }
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { env.DO_BUMP == 'true' }
+        }
+      }
       steps {
         withCredentials([usernamePassword(credentialsId: "${params.GIT_CREDENTIALS_ID}",
                                           usernameVariable: 'GIT_USER',
