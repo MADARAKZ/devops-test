@@ -36,3 +36,6 @@ autoscaling:
 podDisruptionBudget:
   enabled: true
   minAvailable: 2
+
+service:
+  nodePort: 30082
