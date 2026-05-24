@@ -91,7 +91,7 @@ pipeline {
     }
 
     stage('Test') {
-      when { expression { env.SKIP_CI != 'true' } }
+      when { expression { env.TARGET_ENV != 'skip' } }
       parallel {
         stage('Unit Test') {
           steps {
@@ -129,7 +129,7 @@ pipeline {
     }
 
     stage('Docker Build') {
-      when { expression { env.SKIP_CI != 'true' } }
+      when { expression { env.TARGET_ENV != 'skip' } }
       steps {
         retry(2) {
           sh '''
