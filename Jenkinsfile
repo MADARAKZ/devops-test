@@ -132,6 +132,7 @@ pipeline {
     string(name: 'GITOPS_DIR', defaultValue: 'gitops', description: 'GitOps overlays directory')
     string(name: 'DOCKER_CREDENTIALS_ID', defaultValue: 'docker-registry', description: 'Jenkins username/password credential for Docker registry')
     string(name: 'GIT_CREDENTIALS_ID', defaultValue: 'github-push', description: 'Jenkins username/password credential for Git push')
+    booleanParam(name: 'ROLLBACK_GITOPS', defaultValue: false, description: 'Manually roll back the latest GitOps image-tag commit for this environment')
   }
 
   options {
@@ -162,7 +163,7 @@ pipeline {
           env.SOURCE_TAG = env.TAG_NAME ?: ''
 
           def commitMessage = sh(script: 'git log -1 --pretty=%B', returnStdout: true).trim().toLowerCase()
-          if (commitMessage.contains('[skip ci]') || commitMessage.contains('[ci skip]')) {
+          if (!params.ROLLBACK_GITOPS && (commitMessage.contains('[skip ci]') || commitMessage.contains('[ci skip]'))) {
             env.SKIP_CI = 'true'
             currentBuild.result = 'NOT_BUILT'
             currentBuild.description = 'skipped by commit message'
@@ -187,8 +188,6 @@ pipeline {
           env.REQUIRE_APPROVAL = strategy['requiresApproval'].toString()
           env.GITOPS_TARGET_BRANCH = strategy['gitopsBranch']
           env.VALUES_FILE_PATH = strategy['overlay'] ? "${params.GITOPS_DIR}/${strategy['overlay']}/values.yaml" : ''
-          env.DEPLOY_FAILED = 'false'
-          env.GITOPS_COMMIT_CREATED = 'false'
 
           currentBuild.description = "${env.TARGET_ENV} ${env.IMAGE_TAG}"
           echo "Branch: ${env.SOURCE_BRANCH}"
@@ -203,7 +202,12 @@ pipeline {
     }
 
     stage('Quality Gates') {
-      when { expression { env.SKIP_CI != 'true' } }
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { !params.ROLLBACK_GITOPS }
+        }
+      }
       parallel {
         stage('App Lint & Test') {
           steps {
@@ -273,7 +277,12 @@ pipeline {
     }
 
     stage('Build Image') {
-      when { expression { env.SKIP_CI != 'true' } }
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { !params.ROLLBACK_GITOPS }
+        }
+      }
       steps {
         sh '''
           set -eu
@@ -290,7 +299,12 @@ pipeline {
     }
 
     stage('Scan Image if needed') {
-      when { expression { env.SKIP_CI != 'true' } }
+      when {
+        allOf {
+          expression { env.SKIP_CI != 'true' }
+          expression { !params.ROLLBACK_GITOPS }
+        }
+      }
       steps {
         sh '''
           set -eu
@@ -307,6 +321,7 @@ pipeline {
       when {
         allOf {
           expression { env.SKIP_CI != 'true' }
+          expression { !params.ROLLBACK_GITOPS }
           expression { env.DO_PUSH == 'true' }
         }
       }
@@ -331,6 +346,7 @@ pipeline {
       when {
         allOf {
           expression { env.SKIP_CI != 'true' }
+          expression { !params.ROLLBACK_GITOPS }
           expression { env.DO_GITOPS_UPDATE == 'true' }
           expression { env.REQUIRE_APPROVAL == 'true' }
         }
@@ -344,6 +360,7 @@ pipeline {
       when {
         allOf {
           expression { env.SKIP_CI != 'true' }
+          expression { !params.ROLLBACK_GITOPS }
           expression { env.DO_GITOPS_UPDATE == 'true' }
         }
       }
@@ -405,6 +422,7 @@ pipeline {
       when {
         allOf {
           expression { env.SKIP_CI != 'true' }
+          expression { !params.ROLLBACK_GITOPS }
           expression { env.DO_GITOPS_UPDATE == 'true' }
         }
       }
@@ -431,9 +449,6 @@ pipeline {
               git -c http.extraHeader="Authorization: Basic ${auth_header}" pull --rebase origin "${GITOPS_TARGET_BRANCH}"
             '''
 
-            env.GITOPS_COMMIT = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
-            env.GITOPS_COMMIT_CREATED = 'true'
-
             sh '''
               set -eu
               auth_header="$(printf '%s:%s' "${GIT_USERNAME}" "${GIT_PASSWORD}" | base64 | tr -d '\n')"
@@ -444,69 +459,12 @@ pipeline {
       }
     }
 
-    stage('Verify Deployment') {
+    stage('Manual Rollback GitOps') {
       when {
         allOf {
           expression { env.SKIP_CI != 'true' }
           expression { env.DO_GITOPS_UPDATE == 'true' }
-          expression { env.GITOPS_COMMIT_CREATED == 'true' }
-        }
-      }
-      steps {
-        script {
-          def status = sh(
-            returnStatus: true,
-            script: '''
-              set -eu
-              if ! command -v kubectl >/dev/null 2>&1; then
-                echo "kubectl not installed; skipping deployment verification"
-                exit 0
-              fi
-
-              namespace="${OVERLAY}"
-              if ! kubectl -n "${namespace}" get deploy "${IMAGE_NAME}" >/dev/null 2>&1; then
-                namespace="default"
-              fi
-
-              if ! kubectl -n "${namespace}" get deploy "${IMAGE_NAME}" >/dev/null 2>&1; then
-                echo "No deployment found for ${IMAGE_NAME}; skipping rollout verification"
-                exit 0
-              fi
-
-              kubectl -n "${namespace}" rollout status "deployment/${IMAGE_NAME}" --timeout=180s
-            '''
-          )
-
-          if (status != 0) {
-            env.DEPLOY_FAILED = 'true'
-            currentBuild.result = 'UNSTABLE'
-            echo 'Deployment verification failed. Manual rollback stage will run.'
-          }
-        }
-      }
-    }
-
-    stage('Manual Rollback') {
-      when {
-        allOf {
-          expression { env.SKIP_CI != 'true' }
-          expression { env.DO_GITOPS_UPDATE == 'true' }
-          expression { env.GITOPS_COMMIT_CREATED == 'true' }
-          expression { env.DEPLOY_FAILED == 'true' }
-        }
-      }
-      steps {
-        input message: "Deployment failed. Roll back ${env.OVERLAY} to the previous image tag?", ok: 'Rollback'
-      }
-    }
-
-    stage('Rollback GitOps') {
-      when {
-        allOf {
-          expression { env.SKIP_CI != 'true' }
-          expression { env.DO_GITOPS_UPDATE == 'true' }
-          expression { env.GITOPS_COMMIT_CREATED == 'true' }
-          expression { env.DEPLOY_FAILED == 'true' }
+          expression { params.ROLLBACK_GITOPS }
         }
       }
       steps {
@@ -523,7 +481,10 @@ pipeline {
             auth_header="$(printf '%s:%s' "${GIT_USERNAME}" "${GIT_PASSWORD}" | base64 | tr -d '\n')"
             git -c http.extraHeader="Authorization: Basic ${auth_header}" fetch origin "${GITOPS_TARGET_BRANCH}"
             git checkout -B "${GITOPS_TARGET_BRANCH}" FETCH_HEAD
-            git revert --no-commit "${GITOPS_COMMIT}"
+
+            rollback_commit="$(git log -n 1 --format=%H -- "${VALUES_FILE_PATH}")"
+            test -n "${rollback_commit}"
+            git revert --no-commit "${rollback_commit}"
 
             if git diff --quiet -- "${VALUES_FILE_PATH}"; then
               echo "No rollback change to commit."
@@ -531,7 +492,7 @@ pipeline {
             fi
 
             git add "${VALUES_FILE_PATH}"
-            git commit -m "ci(${OVERLAY}): rollback ${IMAGE_NAME} after failed deploy [skip ci]"
+            git commit -m "ci(${OVERLAY}): rollback ${IMAGE_NAME} to previous image tag [skip ci]"
             git -c http.extraHeader="Authorization: Basic ${auth_header}" pull --rebase origin "${GITOPS_TARGET_BRANCH}"
             git -c http.extraHeader="Authorization: Basic ${auth_header}" push origin "HEAD:refs/heads/${GITOPS_TARGET_BRANCH}"
           '''
