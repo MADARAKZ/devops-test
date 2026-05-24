@@ -20,10 +20,14 @@ pipeline {
   }
 
   environment {
-    APP_DIR   = 'app'
-    IMAGE     = ''
-    VERSION   = ''
-    IS_PROD   = 'false'
+    APP_DIR     = 'app'
+    REGISTRY    = "${params.REGISTRY}"
+    IMAGE_NAME  = "${params.IMAGE_NAME}"
+    NAMESPACE   = "${params.NAMESPACE}"
+    RELEASE     = "${params.RELEASE}"
+    CHART_PATH  = "${params.CHART_PATH}"
+    APP_PORT    = "${params.APP_PORT}"
+    DEPLOY_MODE = "${params.DEPLOY_MODE}"
   }
 
   stages {
@@ -32,11 +36,11 @@ pipeline {
       steps {
         checkout scm
         script {
-          def shortSha   = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
-          def branch     = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
-          env.VERSION    = "${env.BUILD_NUMBER}-${shortSha}"
-          env.IMAGE      = "${params.REGISTRY}/${params.IMAGE_NAME}:${env.VERSION}"
-          env.IS_PROD    = (branch == 'main' || branch == 'master') ? 'true' : 'false'
+          def shortSha = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          def branch   = env.BRANCH_NAME ?: sh(script: 'git rev-parse --abbrev-ref HEAD', returnStdout: true).trim()
+          env.VERSION  = "${env.BUILD_NUMBER}-${shortSha}"
+          env.IMAGE    = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.VERSION}"
+          env.IS_PROD  = (branch == 'main' || branch == 'master') ? 'true' : 'false'
           echo "Branch=${branch} Version=${env.VERSION} Image=${env.IMAGE} IsProd=${env.IS_PROD}"
         }
       }
@@ -92,7 +96,7 @@ pipeline {
         allOf {
           expression { return env.IS_PROD == 'true' }
           expression { return params.PROD_APPROVAL }
-          expression { return params.DEPLOY_MODE == 'helm' }
+          expression { return env.DEPLOY_MODE == 'helm' }
         }
       }
       steps {
@@ -104,21 +108,21 @@ pipeline {
       steps {
         script {
           def cmd = """\
-helm upgrade --install ${params.RELEASE} ${params.CHART_PATH} \\
-  --namespace ${params.NAMESPACE} \\
+helm upgrade --install ${env.RELEASE} ${env.CHART_PATH} \\
+  --namespace ${env.NAMESPACE} \\
   --create-namespace \\
-  --set image.repository=${params.REGISTRY}/${params.IMAGE_NAME} \\
+  --set image.repository=${env.REGISTRY}/${env.IMAGE_NAME} \\
   --set image.tag=${env.VERSION} \\
-  --set config.data.PORT=${params.APP_PORT} \\
+  --set config.data.PORT=${env.APP_PORT} \\
   --set deployment.strategy.type=RollingUpdate \\
   --set deployment.strategy.rollingUpdate.maxUnavailable=0 \\
   --set deployment.strategy.rollingUpdate.maxSurge=1
 """.stripIndent()
           writeFile file: 'deploy-command.txt', text: cmd
 
-          if (params.DEPLOY_MODE == 'helm') {
+          if (env.DEPLOY_MODE == 'helm') {
             sh cmd
-            sh "kubectl rollout status deployment/${params.RELEASE} -n ${params.NAMESPACE} --timeout=180s"
+            sh "kubectl rollout status deployment/${env.RELEASE} -n ${env.NAMESPACE} --timeout=180s"
           } else {
             echo "[mock] Would execute:\n${cmd}"
           }
@@ -129,26 +133,26 @@ helm upgrade --install ${params.RELEASE} ${params.CHART_PATH} \\
     stage('Smoke Test') {
       steps {
         script {
-          if (params.DEPLOY_MODE != 'helm') {
-            echo "[mock] Skipping smoke test (DEPLOY_MODE=${params.DEPLOY_MODE})."
+          if (env.DEPLOY_MODE != 'helm') {
+            echo "[mock] Skipping smoke test (DEPLOY_MODE=${env.DEPLOY_MODE})."
             return
           }
-          sh """
+          sh '''
             set -eu
             for i in 1 2 3 4 5; do
-              if kubectl exec deployment/${params.RELEASE} -n ${params.NAMESPACE} -- \\
-                   wget -qO- http://localhost:${params.APP_PORT}/health \\
-                   | tee smoke-test.log \\
+              if kubectl exec "deployment/${RELEASE}" -n "${NAMESPACE}" -- \
+                   wget -qO- "http://localhost:${APP_PORT}/health" \
+                   | tee smoke-test.log \
                    | grep -q '"status":"ok"'; then
-                echo "Smoke test passed on attempt \$i."
+                echo "Smoke test passed on attempt $i."
                 exit 0
               fi
-              echo "Attempt \$i failed; retrying in 5s..."
+              echo "Attempt $i failed; retrying in 5s..."
               sleep 5
             done
             echo "Smoke test failed."
             exit 1
-          """
+          '''
         }
       }
     }
@@ -156,38 +160,40 @@ helm upgrade --install ${params.RELEASE} ${params.CHART_PATH} \\
 
   post {
     success {
-      echo "SUCCESS: ${env.IMAGE} deployed (mode=${params.DEPLOY_MODE})"
+      echo "SUCCESS: ${env.IMAGE} deployed (mode=${env.DEPLOY_MODE})"
     }
 
     failure {
       script {
         echo 'FAILURE: attempting auto-rollback if applicable.'
-        if (params.DEPLOY_MODE != 'helm') {
-          echo "DEPLOY_MODE=${params.DEPLOY_MODE}; nothing to roll back."
+        if (env.DEPLOY_MODE != 'helm') {
+          echo "DEPLOY_MODE=${env.DEPLOY_MODE}; nothing to roll back."
           return
         }
         def revisions = sh(
-          script: "helm history ${params.RELEASE} -n ${params.NAMESPACE} -o json 2>/dev/null | grep -c '\"revision\"' || true",
+          script: "helm history ${env.RELEASE} -n ${env.NAMESPACE} -o json 2>/dev/null | grep -c '\"revision\"' || true",
           returnStdout: true
         ).trim().toInteger()
         if (revisions < 2) {
-          echo "Only ${revisions} revision(s) for ${params.RELEASE}; no rollback target."
+          echo "Only ${revisions} revision(s) for ${env.RELEASE}; no rollback target."
           return
         }
-        echo "Rolling back ${params.RELEASE} in namespace ${params.NAMESPACE}..."
-        sh """
+        echo "Rolling back ${env.RELEASE} in namespace ${env.NAMESPACE}..."
+        sh '''
           set -eu
-          helm rollback ${params.RELEASE} -n ${params.NAMESPACE}
-          kubectl rollout status deployment/${params.RELEASE} -n ${params.NAMESPACE} --timeout=120s
-          helm history ${params.RELEASE} -n ${params.NAMESPACE}
-        """
+          helm rollback "${RELEASE}" -n "${NAMESPACE}"
+          kubectl rollout status "deployment/${RELEASE}" -n "${NAMESPACE}" --timeout=120s
+          helm history "${RELEASE}" -n "${NAMESPACE}"
+        '''
       }
     }
 
     always {
       sh '''
-        docker rmi "${IMAGE_NAME}:test-${BUILD_NUMBER}" >/dev/null 2>&1 || true
-        docker image prune -f --filter label=ci.build="${BUILD_NUMBER}" >/dev/null 2>&1 || true
+        if [ -n "${IMAGE_NAME:-}" ] && [ -n "${BUILD_NUMBER:-}" ]; then
+          docker rmi "${IMAGE_NAME}:test-${BUILD_NUMBER}" >/dev/null 2>&1 || true
+          docker image prune -f --filter "label=ci.build=${BUILD_NUMBER}" >/dev/null 2>&1 || true
+        fi
       '''
       archiveArtifacts artifacts: 'deploy-command.txt,smoke-test.log', allowEmptyArchive: true
     }
