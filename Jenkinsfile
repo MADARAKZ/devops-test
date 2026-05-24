@@ -82,6 +82,45 @@ def resolveStrategy(String branch, String tag, String buildNumber, String shortS
   ]
 }
 
+def resolveQualityGate(String appDir) {
+  if (fileExists("${appDir}/package.json")) {
+    return [
+      image: 'node:20-slim',
+      command: 'if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then npm ci; else npm install; fi; npm run lint --if-present; npm test --if-present'
+    ]
+  }
+
+  if (fileExists("${appDir}/pom.xml")) {
+    return [
+      image: 'maven:3.9-eclipse-temurin-21',
+      command: 'mvn -B test'
+    ]
+  }
+
+  if (fileExists("${appDir}/build.gradle") || fileExists("${appDir}/build.gradle.kts")) {
+    return [
+      image: 'gradle:8-jdk21',
+      command: 'gradle test --no-daemon'
+    ]
+  }
+
+  if (fileExists("${appDir}/go.mod")) {
+    return [
+      image: 'golang:1.23',
+      command: 'go test ./...'
+    ]
+  }
+
+  if (fileExists("${appDir}/requirements.txt") || fileExists("${appDir}/pyproject.toml")) {
+    return [
+      image: 'python:3.12-slim',
+      command: 'python -m pip install --upgrade pip; if [ -f requirements.txt ]; then pip install -r requirements.txt; fi; python -m pytest'
+    ]
+  }
+
+  return null
+}
+
 pipeline {
   agent { label 'docker-agent' }
 
@@ -145,15 +184,15 @@ pipeline {
         script {
           def strategy = resolveStrategy(env.SOURCE_BRANCH, env.SOURCE_TAG, env.BUILD_NUMBER, env.SHORT_SHA)
 
-          env.TARGET_ENV = strategy.targetEnv
-          env.OVERLAY = strategy.overlay
-          env.IMAGE_TAG = strategy.imageTag
-          env.IMAGE = "${params.REGISTRY}/${params.IMAGE_NAME}:${strategy.imageTag}"
-          env.DO_PUSH = strategy.pushImage.toString()
-          env.DO_GITOPS_UPDATE = strategy.updateGitOps.toString()
-          env.REQUIRE_APPROVAL = strategy.requiresApproval.toString()
-          env.GITOPS_TARGET_BRANCH = strategy.gitopsBranch
-          env.VALUES_FILE_PATH = strategy.overlay ? "${params.GITOPS_DIR}/${strategy.overlay}/values.yaml" : ''
+          env.TARGET_ENV = strategy['targetEnv']
+          env.OVERLAY = strategy['overlay']
+          env.IMAGE_TAG = strategy['imageTag']
+          env.IMAGE = "${params.REGISTRY}/${params.IMAGE_NAME}:${strategy['imageTag']}"
+          env.DO_PUSH = strategy['pushImage'].toString()
+          env.DO_GITOPS_UPDATE = strategy['updateGitOps'].toString()
+          env.REQUIRE_APPROVAL = strategy['requiresApproval'].toString()
+          env.GITOPS_TARGET_BRANCH = strategy['gitopsBranch']
+          env.VALUES_FILE_PATH = strategy['overlay'] ? "${params.GITOPS_DIR}/${strategy['overlay']}/values.yaml" : ''
 
           currentBuild.description = "${env.TARGET_ENV} ${env.IMAGE_TAG}"
           echo "Branch: ${env.SOURCE_BRANCH}"
@@ -172,19 +211,35 @@ pipeline {
       parallel {
         stage('App Lint & Test') {
           steps {
-            sh '''
-              set -eu
-              test -d "${APP_DIR}"
-              rm -rf .jenkins-app-test
-              mkdir -p .jenkins-app-test
-              cp -a "${APP_DIR}/." .jenkins-app-test/
+            script {
+              def gate = resolveQualityGate(params.APP_DIR)
+              if (gate == null) {
+                echo "No supported quality gate found in ${params.APP_DIR}; skipping app lint/test."
+                return
+              }
 
-              docker run --rm \
-                -v "$PWD/.jenkins-app-test:/workspace" \
-                -w /workspace \
-                node:20-slim \
-                sh -ec 'npm ci && npm run lint && npm test'
-            '''
+              withEnv([
+                "QUALITY_IMAGE=${gate.image}",
+                "QUALITY_COMMAND=${gate.command}"
+              ]) {
+                sh '''
+                  set -eu
+                  test -d "${APP_DIR}"
+                  test_container="app-test-${BUILD_NUMBER}-${SHORT_SHA}"
+                  docker rm -f "${test_container}" >/dev/null 2>&1 || true
+
+                  docker create \
+                    --name "${test_container}" \
+                    -w /workspace \
+                    "${QUALITY_IMAGE}" \
+                    sh -ec "${QUALITY_COMMAND}"
+
+                  trap 'docker rm -f "${test_container}" >/dev/null 2>&1 || true' EXIT
+                  docker cp "${APP_DIR}/." "${test_container}:/workspace"
+                  docker start -a "${test_container}"
+                '''
+              }
+            }
           }
         }
 
