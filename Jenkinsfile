@@ -18,7 +18,7 @@ def resolveStrategy(String branch, String tag, String buildNumber, String shortS
       pushImage: true,
       updateGitOps: true,
       requiresApproval: true,
-      gitopsBranch: 'main'
+      gitopsBranch: 'gitops/prod'
     ]
   }
 
@@ -30,7 +30,7 @@ def resolveStrategy(String branch, String tag, String buildNumber, String shortS
       pushImage: true,
       updateGitOps: true,
       requiresApproval: true,
-      gitopsBranch: branch
+      gitopsBranch: 'gitops/prod'
     ]
   }
 
@@ -42,7 +42,7 @@ def resolveStrategy(String branch, String tag, String buildNumber, String shortS
       pushImage: true,
       updateGitOps: true,
       requiresApproval: false,
-      gitopsBranch: branch
+      gitopsBranch: 'gitops/dev'
     ]
   }
 
@@ -54,7 +54,7 @@ def resolveStrategy(String branch, String tag, String buildNumber, String shortS
       pushImage: true,
       updateGitOps: true,
       requiresApproval: false,
-      gitopsBranch: branch
+      gitopsBranch: 'gitops/staging'
     ]
   }
 
@@ -67,7 +67,7 @@ def resolveStrategy(String branch, String tag, String buildNumber, String shortS
       pushImage: true,
       updateGitOps: true,
       requiresApproval: true,
-      gitopsBranch: branch
+      gitopsBranch: 'gitops/prod'
     ]
   }
 
