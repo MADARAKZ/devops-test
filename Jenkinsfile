@@ -8,7 +8,7 @@ pipeline {
     string(name: 'APP_DIR', defaultValue: 'app', description: 'Source directory mounted into the test container')
     string(name: 'DOCKERFILE', defaultValue: 'app/Dockerfile', description: 'Path to Dockerfile (relative to repo root)')
     string(name: 'DOCKER_TARGET', defaultValue: 'runtime', description: 'docker build --target')
-    string(name: 'DOCKER_CONTEXT', defaultValue: 'app', description: 'docker build context directory')
+    string(name: 'BUILD_CONTEXT_DIR', defaultValue: 'app', description: 'docker build context directory')
 
     string(name: 'TEST_IMAGE', defaultValue: 'node:20-slim', description: 'Container image used for App Lint & Test')
     text(name: 'TEST_SCRIPT', defaultValue: '''set -eu
@@ -46,7 +46,7 @@ npm test
     APP_DIR = "${params.APP_DIR}"
     DOCKERFILE = "${params.DOCKERFILE}"
     DOCKER_TARGET = "${params.DOCKER_TARGET}"
-    DOCKER_CONTEXT = "${params.DOCKER_CONTEXT}"
+    BUILD_CONTEXT_DIR = "${params.BUILD_CONTEXT_DIR}"
     TEST_IMAGE = "${params.TEST_IMAGE}"
     HELM_CHART = "${params.HELM_CHART}"
     KUSTOMIZE_OVERLAYS = "${params.KUSTOMIZE_OVERLAYS}"
@@ -176,7 +176,7 @@ npm test
               --label ci.commit="$(git rev-parse --short HEAD)" \
               --label ci.target="${TARGET_ENV}" \
               --build-arg APP_VERSION="${VERSION}" \
-              -t "${IMAGE}" "${DOCKER_CONTEXT}"
+              -t "${IMAGE}" "${BUILD_CONTEXT_DIR}"
           '''
         }
       }
