@@ -231,6 +231,8 @@ pipeline {
 
             remote_url=$(git config --get remote.origin.url)
             push_url=$(echo "$remote_url" | sed -E "s#https://#https://${GIT_USER}:${GIT_TOKEN}@#")
+            git fetch origin "${GIT_BRANCH_NAME}"
+            git rebase "origin/${GIT_BRANCH_NAME}"
             git push "$push_url" "HEAD:${GIT_BRANCH_NAME}"
           '''
         }
