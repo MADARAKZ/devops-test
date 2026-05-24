@@ -147,12 +147,6 @@ pipeline {
     APP_DIR = "${params.APP_DIR}"
     CHART_PATH = "${params.CHART_PATH}"
     GITOPS_DIR = "${params.GITOPS_DIR}"
-    SKIP_CI = 'false'
-    DO_PUSH = 'false'
-    DO_GITOPS_UPDATE = 'false'
-    REQUIRE_APPROVAL = 'false'
-    DEPLOY_FAILED = 'false'
-    GITOPS_COMMIT_CREATED = 'false'
   }
 
   stages {
@@ -193,6 +187,8 @@ pipeline {
           env.REQUIRE_APPROVAL = strategy['requiresApproval'].toString()
           env.GITOPS_TARGET_BRANCH = strategy['gitopsBranch']
           env.VALUES_FILE_PATH = strategy['overlay'] ? "${params.GITOPS_DIR}/${strategy['overlay']}/values.yaml" : ''
+          env.DEPLOY_FAILED = 'false'
+          env.GITOPS_COMMIT_CREATED = 'false'
 
           currentBuild.description = "${env.TARGET_ENV} ${env.IMAGE_TAG}"
           echo "Branch: ${env.SOURCE_BRANCH}"
