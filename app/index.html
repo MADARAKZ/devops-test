@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bulletin Board</title>
+  <link rel="stylesheet" href="node_modules/bootstrap/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="site.css">
+  <style>
+  .form-control {
+    margin-bottom: 10px;
+  }
+  .btn-danger {
+    margin-top: 8px;
+  }
+  </style>
+</head>
+<body>
+
+  <div class="jumbotron py-5 mb-4">
+    <h1 class="display-5">Welcome to the Bulletin Board</h1>
+  </div>
+
+  <div class="container" id="events">
+    <div class="row g-4">
+      <div class="col-sm-7">
+        <div class="card text-dark">
+          <div class="card-header">
+            <h3 class="h5 mb-0">Add an Event</h3>
+          </div>
+          <div class="card-body">
+            <div>
+              <input class="form-control" placeholder="Title" v-model="event.title">
+              <textarea class="form-control" placeholder="Detail" v-model="event.detail"></textarea>
+              <input type="date" class="form-control" placeholder="Date" v-model="event.date">
+              <button class="btn btn-primary" v-on:click="addEvent">Submit</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-5">
+        <div class="list-group">
+          <div class="list-group-item" v-for="event in events" v-bind:key="event.id">
+            <h4 class="h5 list-group-item-heading">{{ event.title }}</h4>
+            <h5 class="h6 text-body-secondary" v-if="event.date">{{ event.date }}</h5>
+            <p class="list-group-item-text" v-if="event.detail">{{ event.detail }}</p>
+            <button class="btn btn-sm btn-danger" v-on:click="deleteEvent(event.id)">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+<script src="node_modules/vue/dist/vue.global.prod.js"></script>
+<script src="app.js"></script>
+</html>

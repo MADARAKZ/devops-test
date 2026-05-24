@@ -1,0 +1,61 @@
+version: "3.8"
+
+services:
+  jenkins-controller:
+    build:
+      context: ./jenkins/controller
+    container_name: jenkins-controller
+    restart: unless-stopped
+    depends_on:
+      - jenkins-agent
+    ports:
+      - "8080:8080"
+    environment:
+      JAVA_OPTS: "-Djenkins.install.runSetupWizard=false"
+      CASC_JENKINS_CONFIG: "/var/jenkins_home/casc_configs/jenkins.yaml"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - ./.local/casc:/var/jenkins_home/casc_configs:ro
+    networks:
+      - devops-net
+
+  jenkins-agent:
+    build:
+      context: ./jenkins/agent
+      args:
+        JENKINS_AGENT_SSH_PUBKEY: "${JENKINS_AGENT_SSH_PUBKEY}"
+        KUBECTL_VERSION: "${KUBECTL_VERSION:-v1.30.6}"
+        HELM_VERSION: "${HELM_VERSION:-v3.19.4}"
+    container_name: jenkins-agent
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - devops-net
+
+  local-registry:
+    image: registry:2
+    container_name: local-registry
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    networks:
+      - devops-net
+
+  demo-app:
+    build:
+      context: ./app
+    container_name: demo-app
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    networks:
+      - devops-net
+
+volumes:
+  jenkins_home:
+
+networks:
+  devops-net:
+    name: devops-net
+    driver: bridge
