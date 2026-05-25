@@ -2,7 +2,6 @@
 
 CI bằng Jenkins → Docker image; CD bằng ArgoCD pulling Kustomize+Helm overlays. Mỗi branch ánh xạ vào một môi trường.
 ## Repo layout
-
 ```text
 .
 ├── app/                              Demo Node.js service + Dockerfile
