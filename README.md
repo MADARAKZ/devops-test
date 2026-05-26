@@ -1,6 +1,9 @@
 # DevOps Engineer Case Study
 
 CI bằng Jenkins → Docker image; CD bằng ArgoCD pulling Kustomize+Helm overlays. Mỗi branch ánh xạ vào một môi trường.
+
+Report cuối cùng: `DevOps_CaseStudy_Report.pdf`.
+
 ## Repo layout
 ```text
 .
@@ -14,10 +17,12 @@ CI bằng Jenkins → Docker image; CD bằng ArgoCD pulling Kustomize+Helm over
 │   ├── project.yaml                                # AppProject scoping the 3 envs
 │   ├── application-dev.yaml                        # auto-sync, prune, selfHeal
 │   ├── application-staging.yaml                    # auto-sync, prune, selfHeal
-│   └── application-prod.yaml                       # manual sync (approval gate)
+│   ├── application-prod.yaml                       # manual sync (approval gate)
+│   └── values.yaml                                 # Helm values for ArgoCD install
 ├── jenkins/{controller,agent}/        Jenkins images + JCasC
 ├── scripts/                           start-local.sh, create-polling-job.sh, minikube-cilium.sh
 ├── docker-compose.yml                 Jenkins + agent + registry + demo app
+├── DevOps_CaseStudy_Report.pdf        Final report
 └── Jenkinsfile                        CI + GitOps bump
 ```
 
@@ -97,9 +102,38 @@ chmod +x scripts/*.sh
 
    Repeat (or use a Multibranch job) for `develop`, `staging`, etc., or set up one Multibranch Pipeline.
 
+## Install ArgoCD with Helm
+
+ArgoCD is installed with the official Helm chart and a local values file. The
+important setting is `kustomize.buildOptions: --enable-helm`, because the
+GitOps overlays use Kustomize `helmCharts`.
+
+```bash
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+
+kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+
+helm upgrade --install argocd argo/argo-cd \
+  --namespace argocd \
+  --values argocd/values.yaml \
+  --wait
+```
+
+ArgoCD UI:
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d
+echo
+
+minikube -p cilium-lab ip
+# http://<minikube-ip>:30090   username: admin
+```
+
 ## Install ArgoCD applications
 
-After ArgoCD is running in the cluster:
+After ArgoCD is running:
 
 ```bash
 kubectl apply -n argocd -f argocd/project.yaml

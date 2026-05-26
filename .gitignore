@@ -2,8 +2,8 @@ node_modules/
 .local/
 .agents/
 .codex/
+.claude/
 *.log
 .DS_Store
 .idea/
 .vscode/
-
